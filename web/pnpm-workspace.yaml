@@ -1,0 +1,5 @@
+# pnpm 11 reads dependency build approvals from this file even in
+# single-package projects. esbuild needs its postinstall to place the
+# platform binary used by Vite.
+allowBuilds:
+  esbuild: true

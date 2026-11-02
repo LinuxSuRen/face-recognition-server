@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: CGO_ENABLED=0 go vet ./...
+      - name: Pure-Go unit tests
+        run: CGO_ENABLED=0 go test ./...
+      - name: Full build (CGO) without models
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends clang
+          CGO_ENABLED=1 go build ./...
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install onnxruntime
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends clang curl
+          curl -fL --retry 4 -o ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          tar -xzf ort.tgz
+          echo "ORT_ROOT=$PWD/onnxruntime-linux-x64-1.20.1" >> "$GITHUB_ENV"
+      - name: Download models
+        run: ./scripts/download-models.sh models
+      - name: Engine integration tests
+        env:
+          FACE_RECOGNITION_MODELS: ${{ github.workspace }}/models
+          CGO_ENABLED: 1
+          CGO_CFLAGS: -I$ORT_ROOT/include
+          CGO_LDFLAGS: -L$ORT_ROOT/lib -lonnxruntime -Wl,-rpath,$ORT_ROOT/lib
+        run: go test -tags integration ./internal/engine/... -run TestIntegration -v
