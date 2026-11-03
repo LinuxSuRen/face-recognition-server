@@ -63,9 +63,12 @@ jobs:
             ${{ steps.image.outputs.name }}:${{ needs.resolve.outputs.version }}
             ${{ steps.image.outputs.name }}:latest
 
-  binaries:
+  # release builds the binaries and publishes the GitHub release in one
+  # job: cross-job artifact downloads proved flaky, so nothing is passed
+  # between jobs anymore.
+  release:
     runs-on: ubuntu-latest
-    needs: [resolve]
+    needs: [resolve, image]
     if: needs.resolve.outputs.channel == 'release'
     steps:
       - uses: actions/checkout@v4
@@ -104,25 +107,6 @@ jobs:
           tar -czf face-recognition-server_${VERSION}_linux_amd64.tar.gz \
             face-recognition-server_linux_amd64
           sha256sum ./*.tar.gz > sha256sums.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-assets
-          path: out/*.tar.gz
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-checksums
-          path: out/sha256sums.txt
-
-  github-release:
-    runs-on: ubuntu-latest
-    needs: [resolve, image, binaries]
-    if: needs.resolve.outputs.channel == 'release'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: assets
-          merge-multiple: true
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,4 +130,5 @@ jobs:
           **Checksums** are in sha256sums.txt next to the tarballs.
 
           See the README for configuration and the HTTP API." \
-            assets/*
+            out/face-recognition-server_${VERSION}_linux_amd64.tar.gz \
+            out/sha256sums.txt
