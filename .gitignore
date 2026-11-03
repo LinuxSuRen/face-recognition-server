@@ -1,6 +1,6 @@
 # Binaries
 bin/
-dist/
+web/dist/
 *.exe
 
 # Runtime data and models (downloaded via scripts/download-models)
