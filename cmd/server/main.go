@@ -8,11 +8,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/LinuxSuRen/face-recognition-server/internal/api"
 	"github.com/LinuxSuRen/face-recognition-server/internal/config"
+	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
+	_ "github.com/LinuxSuRen/face-recognition-server/internal/engine/onnxrt" // registers the CGO backend when built with cgo
+	"github.com/LinuxSuRen/face-recognition-server/internal/store"
 )
 
 func main() {
@@ -21,9 +25,29 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
+	faceStore, err := store.Open(cfg.DBPath)
+	if err != nil {
+		logger.Error("[server] opening database failed", "error", err)
+		os.Exit(1)
+	}
+	defer faceStore.Close()
+
+	faceEngine, err := engine.New(engine.Options{
+		DetectorPath:   filepath.Join(cfg.ModelsDir, "face_detection_yunet.onnx"),
+		RecognizerPath: filepath.Join(cfg.ModelsDir, "face_recognition_sface.onnx"),
+	})
+	if err != nil {
+		// Degraded mode: the UI and profile management stay available.
+		logger.Warn("[server] inference engine unavailable", "error", err)
+	} else {
+		defer faceEngine.Close()
+		logger.Info("[server] inference engine ready",
+			"model_version", faceEngine.ModelVersion())
+	}
+
 	server := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           api.NewRouter(api.Deps{Config: cfg, Logger: logger}),
+		Handler:           api.NewRouter(api.Deps{Config: cfg, Logger: logger, Store: faceStore, Engine: faceEngine}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

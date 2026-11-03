@@ -35,6 +35,12 @@ type PageResponse struct {
 // page < 1 becomes 1 and page_size outside (0, MaxPageSize] falls back to the
 // default.
 func parsePageQuery(r *http.Request) PageQuery {
+	return parsePageQueryDefault(r, DefaultPageSize)
+}
+
+// parsePageQueryDefault behaves like parsePageQuery with a caller-chosen
+// default page size (e.g. larger sample lists).
+func parsePageQueryDefault(r *http.Request, defaultSize int) PageQuery {
 	query := r.URL.Query()
 	page, err := strconv.Atoi(query.Get("page"))
 	if err != nil || page < 1 {
@@ -42,7 +48,7 @@ func parsePageQuery(r *http.Request) PageQuery {
 	}
 	pageSize, err := strconv.Atoi(query.Get("page_size"))
 	if err != nil || pageSize < 1 {
-		pageSize = DefaultPageSize
+		pageSize = defaultSize
 	}
 	if pageSize > MaxPageSize {
 		pageSize = MaxPageSize

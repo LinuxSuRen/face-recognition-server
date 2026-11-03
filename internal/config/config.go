@@ -34,8 +34,8 @@ func Load() Config {
 		DBPath:           envString("FACE_RECOGNITION_DB", "data/faces.sqlite3"),
 		ModelsDir:        envString("FACE_RECOGNITION_MODELS", "models"),
 		KnownThreshold:   envFloat("FACE_RECOGNITION_KNOWN_THRESHOLD", 0.45),
-		UnknownThreshold: envFloat("FACE_RECOGNITION_UNKNOWN_THRESHOLD", 0.30),
-		MaxImageBytes:    int64(envFloat("FACE_RECOGNITION_MAX_IMAGE_MB", 20) * 1024 * 1024),
+		UnknownThreshold: envFloat("FACE_RECOGNITION_UNKNOWN_THRESHOLD", 0.35),
+		MaxImageBytes:    int64(envFloat("FACE_RECOGNITION_MAX_IMAGE_MB", 10) * 1024 * 1024),
 	}
 }
 

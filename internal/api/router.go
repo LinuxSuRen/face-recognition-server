@@ -3,28 +3,85 @@ package api
 
 import (
 	"encoding/json"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/LinuxSuRen/face-recognition-server/internal/config"
+	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
+	"github.com/LinuxSuRen/face-recognition-server/internal/httpui"
+	"github.com/LinuxSuRen/face-recognition-server/internal/store"
 )
 
-// Deps groups the collaborators every handler may use.
+// Deps groups the collaborators every handler may use. Engine may be nil
+// (CGO-free build or missing models): the server keeps serving the UI and
+// reports the engine as unavailable on /healthz and inference endpoints.
 type Deps struct {
 	Config config.Config
 	Logger *slog.Logger
+	Store  *store.Store
+	Engine engine.Engine
 }
 
-// NewRouter builds the complete HTTP mux: /healthz, versioned API endpoints
-// and the embedded Vue UI as the fallback.
+// NewRouter builds the complete HTTP mux: /healthz, the versioned API and
+// the embedded Vue UI as the fallback.
 func NewRouter(deps Deps) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
-	})
-	// API endpoints are registered in sub-routers as they land; the mux
-	// already serves as the single wiring point for main.
+	mux.HandleFunc("GET /healthz", healthz(deps))
+	registerFacesRoutes(mux, deps)
+	mux.HandleFunc("/", spaHandler(deps))
 	return mux
+}
+
+func healthz(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := "ok"
+		engineState := map[string]any{"ready": deps.Engine != nil}
+		if deps.Engine != nil {
+			engineState["model_version"] = deps.Engine.ModelVersion()
+		} else {
+			status = "degraded"
+		}
+		dbState := map[string]any{"ok": deps.Store != nil}
+		if deps.Store == nil {
+			status = "degraded"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": status,
+			"engine": engineState,
+			"db":     dbState,
+		})
+	}
+}
+
+// spaHandler serves the embedded Vue build; unknown extension-less paths
+// fall back to index.html so client-side routing survives refreshes.
+func spaHandler(deps Deps) http.HandlerFunc {
+	fileSystem := httpui.FS()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if fileSystem == nil {
+			writeError(w, http.StatusNotFound, "web UI is not bundled in this build")
+			return
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name != "" {
+			if _, err := fs.Stat(fileSystem, name); err != nil && !strings.Contains(name, ".") {
+				index, indexErr := httpui.Index()
+				if indexErr == nil {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(index)
+					return
+				}
+			}
+		}
+		http.FileServerFS(fileSystem).ServeHTTP(w, r)
+	}
 }
 
 // writeJSON renders a JSON response with the given status code.
