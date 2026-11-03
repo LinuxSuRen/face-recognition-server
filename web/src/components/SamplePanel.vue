@@ -1,5 +1,5 @@
 <script setup>
-import {onUnmounted, reactive} from 'vue'
+import {nextTick, onUnmounted, reactive, ref} from 'vue'
 
 defineProps({
   employee: {type: Object, default: null},
@@ -9,7 +9,16 @@ defineProps({
 
 const emit = defineEmits(['upload', 'delete-sample'])
 
-const camera = reactive({active: false, error: '', captured: 0})
+const camera = reactive({
+  // open: the panel is visible; active: a stream is running
+  open: false,
+  active: false,
+  error: '',
+  captured: 0,
+  devices: [],
+  deviceId: '',
+})
+const cameraVideo = ref(null)
 let stream = null
 let timer = null
 
@@ -19,41 +28,18 @@ function onFileChange(event) {
   event.target.value = ''
 }
 
-async function startCamera() {
-  camera.error = ''
+async function openCamera() {
+  camera.open = true
   camera.captured = 0
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: {width: {ideal: 1280}, height: {ideal: 720}},
-      audio: false,
-    })
-    const video = document.getElementById('camera-preview')
-    video.srcObject = stream
-    await video.play()
-    camera.active = true
-    timer = setInterval(captureFrame, 2500)
-  } catch (error) {
-    camera.error = '无法访问摄像头，请检查浏览器权限'
-    stopCamera()
-  }
+  await startStream()
 }
 
-function captureFrame() {
-  const video = document.getElementById('camera-preview')
-  if (!video || !video.videoWidth) return
-  const canvas = document.createElement('canvas')
-  canvas.width = video.videoWidth
-  canvas.height = video.videoHeight
-  canvas.getContext('2d').drawImage(video, 0, 0)
-  canvas.toBlob((blob) => {
-    if (!blob) return
-    camera.captured++
-    emit('upload', [new File([blob], `camera-${Date.now()}.jpg`, {type: 'image/jpeg'})])
-  }, 'image/jpeg', 0.9)
+function closeCamera() {
+  camera.open = false
+  stopEverything()
 }
 
-function stopCamera() {
-  camera.active = false
+function stopEverything() {
   if (timer) {
     clearInterval(timer)
     timer = null
@@ -62,9 +48,82 @@ function stopCamera() {
     stream.getTracks().forEach((track) => track.stop())
     stream = null
   }
+  camera.active = false
 }
 
-onUnmounted(stopCamera)
+// startStream opens the camera, preferring the selected device; without a
+// selection the browser default is used first and the dropdown reflects
+// the actually opened device afterwards, so machines with several cameras
+// (including virtual ones) can switch explicitly.
+async function startStream(deviceId) {
+  stopEverything()
+  camera.error = ''
+  const video = deviceId
+    ? {deviceId: {exact: deviceId}, width: {ideal: 1280}, height: {ideal: 720}}
+    : {width: {ideal: 1280}, height: {ideal: 720}}
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({video, audio: false})
+  } catch (error) {
+    camera.error = '无法访问摄像头，请检查浏览器权限或选择其他设备'
+    return
+  }
+  camera.active = true
+  await nextTick()
+  const element = cameraVideo.value
+  if (element) {
+    element.srcObject = stream
+    try {
+      await element.play()
+    } catch (error) {
+      // autoplay guard: muted + playsinline should prevent this
+    }
+  }
+  await listDevices()
+  if (!timer) {
+    timer = setInterval(captureFrame, 2500)
+  }
+}
+
+async function listDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    camera.devices = devices
+      .filter((device) => device.kind === 'videoinput')
+      .map((device, index) => ({
+        deviceId: device.deviceId,
+        label: device.label || `摄像头 ${index + 1}`,
+      }))
+    const track = stream && stream.getVideoTracks()[0]
+    const settings = track && track.getSettings ? track.getSettings() : null
+    if (settings && settings.deviceId) {
+      camera.deviceId = settings.deviceId
+    }
+  } catch (error) {
+    // device labels stay empty before permission; not fatal
+  }
+}
+
+function switchCamera() {
+  if (camera.deviceId) {
+    startStream(camera.deviceId)
+  }
+}
+
+function captureFrame() {
+  const element = cameraVideo.value
+  if (!element || !element.videoWidth || !stream) return
+  const canvas = document.createElement('canvas')
+  canvas.width = element.videoWidth
+  canvas.height = element.videoHeight
+  canvas.getContext('2d').drawImage(element, 0, 0)
+  canvas.toBlob((blob) => {
+    if (!blob) return
+    camera.captured++
+    emit('upload', [new File([blob], `camera-${Date.now()}.jpg`, {type: 'image/jpeg'})])
+  }, 'image/jpeg', 0.9)
+}
+
+onUnmounted(stopEverything)
 </script>
 
 <template>
@@ -80,15 +139,24 @@ onUnmounted(stopCamera)
             {{ uploading ? '正在录入…' : '上传人脸照片' }}
             <input type="file" accept="image/jpeg,image/png,image/webp" multiple hidden @change="onFileChange" />
           </label>
-          <button v-if="!camera.active" @click="startCamera">摄像头录入</button>
-          <button v-else class="danger" @click="stopCamera">停止采集（已拍 {{ camera.captured }} 张）</button>
+          <button v-if="!camera.open" @click="openCamera">摄像头录入</button>
+          <button v-else class="danger" @click="closeCamera">
+            停止采集（已拍 {{ camera.captured }} 张）
+          </button>
         </div>
       </header>
       <p class="muted hint">支持多选。每张照片需只有本人正脸、清晰且大小适中；与已有样本不一致的照片会被自动拒绝。</p>
-      <div v-if="camera.active || camera.error" class="camera panel-inset">
-        <video id="camera-preview" playsinline muted></video>
+      <div v-if="camera.open" class="camera panel-inset">
+        <video ref="cameraVideo" playsinline muted></video>
+        <div class="camera-bar">
+          <select v-model="camera.deviceId" aria-label="选择摄像头" :disabled="camera.devices.length < 2" @change="switchCamera">
+            <option v-for="device in camera.devices" :key="device.deviceId" :value="device.deviceId">
+              {{ device.label }}
+            </option>
+          </select>
+          <span v-if="camera.active" class="muted">预览中 · 每 2.5 秒自动采集一帧</span>
+        </div>
         <p v-if="camera.error" class="muted">{{ camera.error }}</p>
-        <p v-else class="muted">每 2.5 秒自动采集一帧并录入，请按提示变换姿态；完成后点击“停止采集”。</p>
       </div>
       <p v-if="!samples.length" class="muted empty">该员工还没有人脸样本。</p>
       <div v-else class="samples">
@@ -145,6 +213,10 @@ button.danger {
   color: var(--danger);
 }
 
+.hint {
+  margin: 8px 0 14px;
+}
+
 .camera {
   display: flex;
   flex-direction: column;
@@ -164,13 +236,14 @@ button.danger {
   background: #101827;
 }
 
-label.upload.busy {
-  opacity: 0.6;
-  cursor: wait;
+.camera-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.hint {
-  margin: 8px 0 14px;
+.camera-bar select {
+  max-width: 260px;
 }
 
 .samples {
