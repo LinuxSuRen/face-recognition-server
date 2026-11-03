@@ -98,6 +98,9 @@ func fetchSamplePhoto() ([]byte, error) {
 	if len(content) < 10_000 {
 		return nil, fmt.Errorf("sample photo suspiciously small: %d", len(content))
 	}
+	if err := os.MkdirAll(filepath.Dir(cache), 0o755); err != nil {
+		return nil, err
+	}
 	if err := os.WriteFile(cache, content, 0o644); err != nil {
 		return nil, err
 	}
