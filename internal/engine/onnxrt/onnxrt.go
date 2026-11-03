@@ -42,10 +42,7 @@ func initializeEnvironment() error {
 				libPath = "libonnxruntime.so"
 			}
 		}
-		if err := ort.SetSharedLibraryPath(libPath); err != nil {
-			envErr = fmt.Errorf("setting onnxruntime library path %q: %w", libPath, err)
-			return
-		}
+		ort.SetSharedLibraryPath(libPath)
 		if err := ort.InitializeEnvironment(ort.WithLogLevelWarning()); err != nil {
 			envErr = fmt.Errorf("initializing onnxruntime: %w", err)
 		}
@@ -153,7 +150,8 @@ func (e *ortEngine) detect(input []float32, width, height int) ([]float32, int, 
 		if e.detectorInput != nil {
 			e.detectorInput.Destroy()
 		}
-		tensor, err := ort.NewTensor[float32](ort.NewShape(1, 3, height, width), input)
+		tensor, err := ort.NewTensor[float32](
+			ort.NewShape(1, 3, int64(height), int64(width)), input)
 		if err != nil {
 			e.detectorInput = nil
 			return nil, 0, fmt.Errorf("creating YuNet input tensor: %w", err)
