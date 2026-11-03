@@ -129,6 +129,9 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           TAG: ${{ github.ref_name }}
         run: |
+          # idempotent: a previous run on the same tag may have published
+          # already (tags get re-pushed after fixes)
+          gh release delete "$TAG" --yes || true
           gh release create "$TAG" \
             --title "face-recognition-server $TAG" \
             --notes "Version $VERSION.
