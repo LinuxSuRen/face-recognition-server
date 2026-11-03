@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/LinuxSuRen/face-recognition-server/internal/auth"
 	"github.com/LinuxSuRen/face-recognition-server/internal/config"
 	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
 	"github.com/LinuxSuRen/face-recognition-server/internal/httpui"
@@ -29,6 +30,13 @@ type Deps struct {
 	EngineError string
 	// RTSP is optional; a fresh manager is created when nil.
 	RTSP *rtsp.Manager
+	// AuthEnabled gates browser-session auth on the management API; the
+	// external recognition endpoints always require bearer tokens.
+	AuthEnabled bool
+	// OIDC configures federated login; empty disables SSO.
+	OIDC auth.OIDCConfig
+	// SessionUser resolves the current user from the request cookie.
+	SessionUser func(r *http.Request) *store.User
 }
 
 // version is reported on /healthz; main overrides it via SetVersion at
@@ -42,11 +50,25 @@ func SetVersion(value string) {
 	}
 }
 
-// NewRouter builds the complete HTTP mux: /healthz, the versioned API and
-// the embedded Vue UI as the fallback.
-func NewRouter(deps Deps) *http.ServeMux {
+// NewRouter builds the complete HTTP surface — /healthz, the versioned API
+// and the embedded Vue UI — wrapped with session authentication.
+func NewRouter(deps Deps) http.Handler {
 	if deps.RTSP == nil {
 		deps.RTSP = rtsp.NewManager(4)
+	}
+	authService := &auth.Service{Store: deps.Store}
+	if deps.SessionUser == nil {
+		deps.SessionUser = func(r *http.Request) *store.User {
+			cookie, err := r.Cookie(auth.SessionCookie)
+			if err != nil {
+				return nil
+			}
+			user, err := authService.SessionUser(r.Context(), cookie.Value)
+			if err != nil {
+				return nil
+			}
+			return user
+		}
 	}
 	faces := &facesAPI{
 		config: deps.Config,
@@ -58,8 +80,53 @@ func NewRouter(deps Deps) *http.ServeMux {
 	mux.HandleFunc("GET /healthz", healthz(deps))
 	registerFacesRoutes(mux, faces)
 	registerRTSPRoutes(mux, deps.RTSP, faces)
+	registerAuthRoutes(mux, deps)
 	mux.HandleFunc("/", spaHandler(deps))
-	return mux
+	return sessionAuth(deps, mux)
+}
+
+// sessionAuth wraps the mux: management endpoints under /api/v1 require a
+// logged-in session (and admin-only routes an admin) when auth is enabled;
+// the login endpoints, the bearer-token external endpoints, healthz and
+// the UI stay public.
+func sessionAuth(deps Deps, next *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !deps.AuthEnabled || isPublicPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		user := deps.SessionUser(r)
+		if user == nil {
+			writeError(w, http.StatusUnauthorized, "请先登录")
+			return
+		}
+		if isAdminOnlyPath(r.URL.Path) && user.Role != auth.AdminRole {
+			writeError(w, http.StatusForbidden, "需要管理员权限")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isPublicPath(path string) bool {
+	prefixes := []string{
+		"/healthz",
+		"/api/v1/auth/",
+		"/api/v1/verify",
+		"/api/v1/identify",
+		"/api/v1/enroll",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return !strings.HasPrefix(path, "/api/")
+}
+
+func isAdminOnlyPath(path string) bool {
+	return strings.HasPrefix(path, "/api/v1/users") ||
+		strings.HasPrefix(path, "/api/v1/tokens")
 }
 
 func healthz(deps Deps) http.HandlerFunc {

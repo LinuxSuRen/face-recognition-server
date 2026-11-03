@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/yalue/onnxruntime_go v1.38.0
+	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.47.0
 	modernc.org/sqlite v1.61.1
 )

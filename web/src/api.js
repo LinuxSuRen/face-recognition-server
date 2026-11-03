@@ -79,3 +79,30 @@ export const rtspApi = {
     return request(`/api/v1/rtsp/sessions/${sessionId}/confirm`, {method: 'POST'})
   },
 }
+
+export const adminApi = {
+  listUsers(params) {
+    return request(`/api/v1/users${queryString(params)}`)
+  },
+  createUser(body) {
+    return request('/api/v1/users', {method: 'POST', body: JSON.stringify(body)})
+  },
+  updateUser(id, body) {
+    return request(`/api/v1/users/${id}`, {method: 'PATCH', body: JSON.stringify(body)})
+  },
+  listTokens() {
+    return request('/api/v1/tokens')
+  },
+  createToken(body) {
+    return request('/api/v1/tokens', {method: 'POST', body: JSON.stringify(body)})
+  },
+  deleteToken(id) {
+    return request(`/api/v1/tokens/${id}`, {method: 'DELETE'})
+  },
+  session() {
+    return request('/api/v1/auth/session')
+  },
+  logout() {
+    return request('/api/v1/auth/logout', {method: 'POST'})
+  },
+}

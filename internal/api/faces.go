@@ -465,16 +465,20 @@ func parseID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) 
 type upload struct {
 	Content     []byte
 	ContentType string
+	// Fields carries the non-file form fields sent alongside the file.
+	Fields map[string]string
 }
 
-// readUpload streams one multipart file field, enforcing the size cap and
+// readUpload streams the multipart body, enforcing the size cap and
 // sniffing the real content type (declared types are unreliable in the
-// wild, the actual bytes are not).
+// wild, the actual bytes are not). Non-file fields are collected so
+// handlers can read them after the stream has been consumed.
 func readUpload(r *http.Request, maxBytes int64, field string) (upload, int, error) {
 	reader, err := r.MultipartReader()
 	if err != nil {
 		return upload{}, http.StatusBadRequest, errors.New("request must be multipart/form-data with a file field")
 	}
+	result := upload{Fields: map[string]string{}}
 	for {
 		part, err := reader.NextPart()
 		if err == io.EOF {
@@ -484,6 +488,12 @@ func readUpload(r *http.Request, maxBytes int64, field string) (upload, int, err
 			return upload{}, http.StatusBadRequest, errors.New("malformed multipart request")
 		}
 		if part.FormName() != field || part.FileName() == "" {
+			if part.FileName() == "" {
+				value, readErr := io.ReadAll(io.LimitReader(part, 1<<16))
+				if readErr == nil {
+					result.Fields[part.FormName()] = strings.TrimSpace(string(value))
+				}
+			}
 			part.Close()
 			continue
 		}
@@ -506,9 +516,13 @@ func readUpload(r *http.Request, maxBytes int64, field string) (upload, int, err
 		if !allowedImageType(contentType) {
 			return upload{}, http.StatusBadRequest, errors.New("file must be a JPEG, PNG, WebP or GIF image")
 		}
-		return upload{Content: content, ContentType: contentType}, 0, nil
+		result.Content = content
+		result.ContentType = contentType
 	}
-	return upload{}, http.StatusBadRequest, errors.New("missing file field " + field)
+	if result.Content == nil {
+		return upload{}, http.StatusBadRequest, errors.New("missing file field " + field)
+	}
+	return result, 0, nil
 }
 
 func sniffImage(content []byte) string {

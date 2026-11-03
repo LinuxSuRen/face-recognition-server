@@ -114,6 +114,73 @@ func Match(embedding []float32, templates []Template, thresholds Thresholds) Res
 	return result
 }
 
+// RankedMatch is one entry of a 1:N identification result.
+type RankedMatch struct {
+	EmployeeID int64   `json:"employee_id"`
+	EmployeeNo string  `json:"employee_no"`
+	Name       string  `json:"name"`
+	Similarity float64 `json:"similarity"`
+}
+
+// Rank returns the top matches for one embedding (1:N identification),
+// using the same max-template scoring as Match and dropping entries below
+// the unknown threshold.
+func Rank(embedding []float32, templates []Template, limit int) []RankedMatch {
+	if limit <= 0 {
+		limit = 3
+	}
+	query := normalize(embedding)
+	if query == nil {
+		return nil
+	}
+	type score struct {
+		id    int64
+		no    string
+		name  string
+		value float64
+	}
+	best := map[int64]*score{}
+	for _, template := range templates {
+		if len(template.Embedding) != len(query) {
+			continue
+		}
+		candidate := normalize(template.Embedding)
+		if candidate == nil {
+			continue
+		}
+		value := dot(query, candidate)
+		current, exists := best[template.EmployeeID]
+		if !exists {
+			best[template.EmployeeID] = &score{
+				id: template.EmployeeID, no: template.EmployeeNo,
+				name: template.Name, value: value,
+			}
+		} else if value > current.value {
+			current.value = value
+		}
+	}
+	ranked := make([]*score, 0, len(best))
+	for _, item := range best {
+		ranked = append(ranked, item)
+	}
+	for i := 1; i < len(ranked); i++ {
+		for j := i; j > 0 && ranked[j].value > ranked[j-1].value; j-- {
+			ranked[j], ranked[j-1] = ranked[j-1], ranked[j]
+		}
+	}
+	matches := []RankedMatch{}
+	for i, item := range ranked {
+		if i >= limit || item.value <= DefaultThresholds.Unknown {
+			break
+		}
+		matches = append(matches, RankedMatch{
+			EmployeeID: item.id, EmployeeNo: item.no, Name: item.name,
+			Similarity: round4(item.value),
+		})
+	}
+	return matches
+}
+
 func normalize(values []float32) []float32 {
 	if len(values) == 0 {
 		return nil

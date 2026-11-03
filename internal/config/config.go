@@ -2,8 +2,12 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"strconv"
+
+	auth "github.com/LinuxSuRen/face-recognition-server/internal/auth"
 )
 
 // Config carries every runtime setting of the server. All values have safe
@@ -52,4 +56,36 @@ func envFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	return value
+}
+
+// LoadAuthEnabled reports whether browser-session auth is on (default
+// enabled); FACE_RECOGNITION_AUTH=disabled is the escape hatch for
+// single-user deployments and tests.
+func LoadAuthEnabled() bool {
+	return envString("FACE_RECOGNITION_AUTH", "enabled") != "disabled"
+}
+
+// LoadAdminPassword returns the bootstrap admin password: the
+// FACE_RECOGNITION_ADMIN_PASSWORD value or a random one printed to logs.
+func LoadAdminPassword() string {
+	if password := os.Getenv("FACE_RECOGNITION_ADMIN_PASSWORD"); password != "" {
+		return password
+	}
+	buffer := make([]byte, 9)
+	if _, err := rand.Read(buffer); err != nil {
+		return "change-me"
+	}
+	return hex.EncodeToString(buffer)
+}
+
+// LoadOIDC reads the federated login configuration (any standards
+// compliant issuer, e.g. home-gate); empty issuer disables SSO.
+func LoadOIDC() auth.OIDCConfig {
+	return auth.OIDCConfig{
+		Issuer:       os.Getenv("FACE_RECOGNITION_OIDC_ISSUER"),
+		ClientID:     os.Getenv("FACE_RECOGNITION_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("FACE_RECOGNITION_OIDC_CLIENT_SECRET"),
+		RedirectURL:  os.Getenv("FACE_RECOGNITION_OIDC_REDIRECT_URL"),
+		Scopes:       os.Getenv("FACE_RECOGNITION_OIDC_SCOPES"),
+	}
 }

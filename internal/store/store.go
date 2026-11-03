@@ -26,6 +26,8 @@ var (
 	ErrDuplicateEmployeeNo = errors.New("employee_no already exists")
 	// ErrInvalidEmbedding marks non-finite or empty embedding values.
 	ErrInvalidEmbedding = errors.New("embedding must contain finite values")
+	// ErrDuplicateUsername marks a unique username collision.
+	ErrDuplicateUsername = errors.New("username already exists")
 )
 
 // Employee is one staff profile row.
@@ -126,6 +128,35 @@ CREATE TABLE IF NOT EXISTS face_templates (
 );
 CREATE INDEX IF NOT EXISTS idx_face_templates_employee_id
     ON face_templates(employee_id);
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    password_hash TEXT,
+    oidc_sub TEXT UNIQUE,
+    role TEXT NOT NULL DEFAULT 'user',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    scopes TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 `)
 	if err != nil {
 		return fmt.Errorf("migrating database: %w", err)
@@ -206,6 +237,30 @@ func (s *Store) GetEmployee(ctx context.Context, id int64) (*Employee, error) {
 		LEFT JOIN face_templates t ON t.employee_id = e.id
 		WHERE e.id = ?
 		GROUP BY e.id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	employees, _, err := scanEmployees(rows, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(employees) == 0 {
+		return nil, ErrNotFound
+	}
+	return &employees[0], nil
+}
+
+// GetEmployeeByNo resolves a profile by its employee number (the external
+// subject identifier).
+func (s *Store) GetEmployeeByNo(ctx context.Context, employeeNo string) (*Employee, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT e.id, e.employee_no, e.name, e.department, e.enabled, e.created_at, e.updated_at,
+		       COUNT(t.id) AS sample_count
+		FROM employees e
+		LEFT JOIN face_templates t ON t.employee_id = e.id
+		WHERE e.employee_no = ?
+		GROUP BY e.id`, employeeNo)
 	if err != nil {
 		return nil, err
 	}

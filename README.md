@@ -1,5 +1,9 @@
 # face-recognition-server
 
+<p align="center">
+  <img src="docs/logo.svg" width="110" alt="face-recognition-server logo" />
+</p>
+
 [![ci](https://github.com/LinuxSuRen/face-recognition-server/actions/workflows/ci.yml/badge.svg)](https://github.com/LinuxSuRen/face-recognition-server/actions/workflows/ci.yml)
 [![release](https://github.com/LinuxSuRen/face-recognition-server/actions/workflows/release.yml/badge.svg)](https://github.com/LinuxSuRen/face-recognition-server/actions/workflows/release.yml)
 [![GitHub release](https://img.shields.io/github/v/release/LinuxSuRen/face-recognition-server)](https://github.com/LinuxSuRen/face-recognition-server/releases)
@@ -30,10 +34,43 @@ images are stored with their 128-d normalized embeddings.
   against the employee's existing samples (cosine ≥ 0.35).
 - **RTSP live recognition** over SSE: ffmpeg pulls the stream, the server
   analyzes the latest frame at its own pace, the browser renders boxes with
-  zero polling.
+  zero polling; the local camera works too (frames posted from the browser).
 - **RTSP enrollment**: the first qualified face requires a manual
   confirmation, then up to 5 samples are auto-collected with pose hints, a
   2-second minimum interval and similarity-based skipping.
+- **External recognition API** with bearer tokens (scopes `verify`,
+  `identify`, `enroll`) so other systems can add face login on top of this
+  platform.
+- **Platform login**: local accounts (bcrypt) plus OIDC federated login
+  (authorization code + PKCE; works with any compliant issuer such as
+  [home-gate](https://github.com/LinuxSuRen/home-gate)). Management
+  endpoints require a session; users and tokens are managed by admins.
+
+## External API (face login for other systems)
+
+Admin issues a token in the UI (系统管理 → 对外接口令牌). The token carries
+scopes; `Authorization: Bearer face_...` authenticates:
+
+```bash
+# enroll a subject (creates the profile on first use)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -F image=@photo.jpg -F subject=user-42 -F name=Alice \
+  http://localhost:8080/api/v1/enroll
+
+# 1:1 verify — the login check
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -F image=@login.jpg -F subject=user-42 \
+  http://localhost:8080/api/v1/verify
+# -> {"subject":"user-42","verified":true,"similarity":0.87,"reason":"ok"}
+
+# 1:N identify — who is in this picture?
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -F image=@photo.jpg http://localhost:8080/api/v1/identify
+```
+
+`verified` requires similarity ≥ `FACE_RECOGNITION_KNOWN_THRESHOLD`;
+`reason` distinguishes `ok`, `below_threshold`, `subject_not_found`,
+`subject_not_enrolled` and `no_usable_face`.
 
 ## Quick start
 
@@ -44,7 +81,8 @@ images are stored with their 128-d normalized embeddings.
 # 2. build & run (CGO + onnxruntime shared library + ffmpeg for RTSP)
 make build && ./bin/server
 
-# open http://localhost:8080
+# open http://localhost:8080 — the first boot creates the admin account
+# (password from FACE_RECOGNITION_ADMIN_PASSWORD or printed in the log)
 ```
 
 Docker (the published image ships the web UI, the ONNX models, onnxruntime
@@ -78,6 +116,12 @@ release in one go.
 | `FACE_RECOGNITION_KNOWN_THRESHOLD` | `0.45` | cosine similarity for a known face |
 | `FACE_RECOGNITION_UNKNOWN_THRESHOLD` | `0.35` | below this a face is reported unknown |
 | `FACE_RECOGNITION_MAX_IMAGE_MB` | `10` | upload size limit in MB |
+| `FACE_RECOGNITION_AUTH` | `enabled` | session auth for management endpoints; `disabled` is the single-user escape hatch |
+| `FACE_RECOGNITION_ADMIN_PASSWORD` | random, logged once | bootstrap admin password on first boot |
+| `FACE_RECOGNITION_OIDC_ISSUER` | — | OIDC issuer URL (e.g. home-gate); enables SSO |
+| `FACE_RECOGNITION_OIDC_CLIENT_ID` | — | OIDC client id |
+| `FACE_RECOGNITION_OIDC_CLIENT_SECRET` | — | OIDC client secret |
+| `FACE_RECOGNITION_OIDC_REDIRECT_URL` | — | OAuth callback URL (`/api/v1/auth/oauth/callback`) |
 
 ## HTTP API
 
@@ -87,6 +131,17 @@ All list endpoints share the pagination contract
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/healthz` | status, engine and database readiness |
+| POST | `/api/v1/auth/login` | username/password → session cookie |
+| POST | `/api/v1/auth/logout` | drop the session |
+| GET | `/api/v1/auth/session` | current user, auth/SSO state |
+| GET | `/api/v1/auth/oauth/{start,callback}` | OIDC authorization-code + PKCE flow |
+| POST / GET | `/api/v1/users` | create / page platform users (admin) |
+| PATCH | `/api/v1/users/{id}` | rename, reset password, toggle, role (admin) |
+| POST / GET | `/api/v1/tokens` | issue (scope-picked) / list API tokens (admin) |
+| DELETE | `/api/v1/tokens/{id}` | revoke a token (admin) |
+| POST | `/api/v1/enroll` | bearer: enroll a face for a subject |
+| POST | `/api/v1/verify` | bearer: 1:1 verify for face login |
+| POST | `/api/v1/identify` | bearer: 1:N identify |
 | POST / GET | `/api/v1/faces/employees` | create / page employees |
 | GET / PATCH / DELETE | `/api/v1/faces/employees/{id}` | detail (+ samples) / update / delete |
 | POST / GET | `/api/v1/faces/employees/{id}/samples` | upload / page face samples |
@@ -107,6 +162,7 @@ stable English `detail` phrases that the frontend maps to friendly copy.
 
 ```
 cmd/server            entrypoint: config, store, engine (best effort), HTTP
+internal/auth         accounts, sessions, API tokens, OIDC client
 internal/engine       pure-Go pipeline: YuNet decode/NMS, SFace alignment,
                       quality gates, image decode/encode
 internal/engine/onnxrt  ONNX Runtime binding (cgo build tag + factory)

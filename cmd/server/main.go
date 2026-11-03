@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/LinuxSuRen/face-recognition-server/internal/api"
+	authpkg "github.com/LinuxSuRen/face-recognition-server/internal/auth"
 	"github.com/LinuxSuRen/face-recognition-server/internal/config"
 	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
 	_ "github.com/LinuxSuRen/face-recognition-server/internal/engine/onnxrt" // registers the CGO backend when built with cgo
@@ -58,6 +59,22 @@ func main() {
 	rtspManager := rtsp.NewManager(4)
 	defer rtspManager.StopAll()
 
+	// platform auth: bootstrap the admin account on first boot
+	authEnabled := config.LoadAuthEnabled()
+	if authEnabled {
+		if count, err := faceStore.CountUsers(context.Background()); err == nil && count == 0 {
+			password := config.LoadAdminPassword() // env or generated
+			if hash, hashErr := authpkg.HashPassword(password); hashErr == nil {
+				if _, createErr := faceStore.CreateUser(context.Background(),
+					"admin", "管理员", hash, authpkg.AdminRole, true); createErr == nil {
+					logger.Info("[server] bootstrap admin account created",
+						"username", "admin", "password", password,
+						"hint", "可用 FACE_RECOGNITION_ADMIN_PASSWORD 指定")
+				}
+			}
+		}
+	}
+
 	server := &http.Server{
 		Addr: cfg.Addr,
 		Handler: api.NewRouter(api.Deps{
@@ -67,6 +84,8 @@ func main() {
 			Engine:      faceEngine,
 			EngineError: engineReason,
 			RTSP:        rtspManager,
+			AuthEnabled: authEnabled,
+			OIDC:        config.LoadOIDC(),
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
