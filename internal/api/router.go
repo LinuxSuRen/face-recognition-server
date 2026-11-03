@@ -11,6 +11,7 @@ import (
 	"github.com/LinuxSuRen/face-recognition-server/internal/config"
 	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
 	"github.com/LinuxSuRen/face-recognition-server/internal/httpui"
+	"github.com/LinuxSuRen/face-recognition-server/internal/rtsp"
 	"github.com/LinuxSuRen/face-recognition-server/internal/store"
 )
 
@@ -22,14 +23,26 @@ type Deps struct {
 	Logger *slog.Logger
 	Store  *store.Store
 	Engine engine.Engine
+	// RTSP is optional; a fresh manager is created when nil.
+	RTSP *rtsp.Manager
 }
 
 // NewRouter builds the complete HTTP mux: /healthz, the versioned API and
 // the embedded Vue UI as the fallback.
 func NewRouter(deps Deps) *http.ServeMux {
+	if deps.RTSP == nil {
+		deps.RTSP = rtsp.NewManager(4)
+	}
+	faces := &facesAPI{
+		config: deps.Config,
+		logger: deps.Logger,
+		store:  deps.Store,
+		engine: deps.Engine,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz(deps))
-	registerFacesRoutes(mux, deps)
+	registerFacesRoutes(mux, faces)
+	registerRTSPRoutes(mux, deps.RTSP, faces)
 	mux.HandleFunc("/", spaHandler(deps))
 	return mux
 }

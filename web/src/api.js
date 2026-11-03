@@ -61,3 +61,18 @@ export const facesApi = {
     return request('/api/v1/faces/recognize', {method: 'POST', body: form})
   },
 }
+
+export const rtspApi = {
+  getConfiguration() {
+    return request('/api/v1/rtsp/configuration')
+  },
+  updateConfiguration(body) {
+    return request('/api/v1/rtsp/configuration', {method: 'PUT', body: JSON.stringify(body)})
+  },
+  createSession() {
+    return request('/api/v1/rtsp/sessions', {method: 'POST'})
+  },
+  stopSession(sessionId) {
+    return request(`/api/v1/rtsp/sessions/${sessionId}`, {method: 'DELETE'})
+  },
+}

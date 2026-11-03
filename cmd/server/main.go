@@ -16,6 +16,7 @@ import (
 	"github.com/LinuxSuRen/face-recognition-server/internal/config"
 	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
 	_ "github.com/LinuxSuRen/face-recognition-server/internal/engine/onnxrt" // registers the CGO backend when built with cgo
+	"github.com/LinuxSuRen/face-recognition-server/internal/rtsp"
 	"github.com/LinuxSuRen/face-recognition-server/internal/store"
 )
 
@@ -45,9 +46,18 @@ func main() {
 			"model_version", faceEngine.ModelVersion())
 	}
 
+	rtspManager := rtsp.NewManager(4)
+	defer rtspManager.StopAll()
+
 	server := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           api.NewRouter(api.Deps{Config: cfg, Logger: logger, Store: faceStore, Engine: faceEngine}),
+		Addr: cfg.Addr,
+		Handler: api.NewRouter(api.Deps{
+			Config: cfg,
+			Logger: logger,
+			Store:  faceStore,
+			Engine: faceEngine,
+			RTSP:   rtspManager,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -25,13 +26,7 @@ type facesAPI struct {
 }
 
 // registerFacesRoutes mounts every faces endpoint on the mux.
-func registerFacesRoutes(mux *http.ServeMux, deps Deps) {
-	api := &facesAPI{
-		config: deps.Config,
-		logger: deps.Logger,
-		store:  deps.Store,
-		engine: deps.Engine,
-	}
+func registerFacesRoutes(mux *http.ServeMux, api *facesAPI) {
 	mux.HandleFunc("POST /api/v1/faces/employees", api.createEmployee)
 	mux.HandleFunc("GET /api/v1/faces/employees", api.listEmployees)
 	mux.HandleFunc("GET /api/v1/faces/employees/{id}", api.getEmployee)
@@ -351,16 +346,28 @@ func (api *facesAPI) recognize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	faces, err := api.engine.Extract(image)
+	payload, err := api.analyze(r.Context(), image)
 	if err != nil {
-		api.logger.Error("[faces][recognize] extraction failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "face extraction failed")
+		api.logger.Error("[faces][recognize] analysis failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "face analysis failed")
 		return
 	}
-	templates, err := api.store.ListMatchTemplates(r.Context())
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// analyze runs extraction plus matching for one image; it backs both the
+// recognize endpoint and the RTSP live sessions.
+func (api *facesAPI) analyze(ctx context.Context, img *engine.Image) (map[string]any, error) {
+	if api.engine == nil {
+		return nil, errors.New(engineUnavailableDetail)
+	}
+	faces, err := api.engine.Extract(img)
 	if err != nil {
-		api.writeStoreError(w, err, "templates not available")
-		return
+		return nil, err
+	}
+	templates, err := api.store.ListMatchTemplates(ctx)
+	if err != nil {
+		return nil, err
 	}
 	version := api.engine.ModelVersion()
 	index := make([]recognizer.Template, 0, len(templates))
@@ -408,7 +415,7 @@ func (api *facesAPI) recognize(w http.ResponseWriter, r *http.Request) {
 		summary[payload.Result.Status]++
 		payloads = append(payloads, payload)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"faces": payloads, "summary": summary})
+	return map[string]any{"faces": payloads, "summary": summary}, nil
 }
 
 // ---- helpers ----
