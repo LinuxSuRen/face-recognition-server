@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -68,10 +70,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	listener, err := listenWithDrift(cfg.Addr, logger)
+	if err != nil {
+		logger.Error("[server] cannot listen", "addr", cfg.Addr, "error", err)
+		os.Exit(1)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("[server] listening", "addr", cfg.Addr)
-		errCh <- server.ListenAndServe()
+		logger.Info("[server] listening", "addr", listener.Addr().String())
+		errCh <- server.Serve(listener)
 	}()
 
 	select {
@@ -89,4 +97,43 @@ func main() {
 		logger.Error("[server] graceful shutdown failed", "error", err)
 	}
 	logger.Info("[server] stopped")
+}
+
+// listenWithDrift binds addr. When exactly its port is already in use the
+// listener drifts to an OS-assigned free port on the same host instead of
+// aborting, and the fallback is logged; any other bind error (permission,
+// bad address) is returned unchanged so misconfiguration stays visible.
+func listenWithDrift(addr string, logger *slog.Logger) (net.Listener, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err == nil {
+		return listener, nil
+	}
+	if !isAddrInUse(err) {
+		return nil, err
+	}
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		host = ""
+	}
+	fallback, fallbackErr := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if fallbackErr != nil {
+		return nil, err // the conflict is the interesting failure
+	}
+	logger.Warn("[server] configured port is busy, drifting to a free port",
+		"configured", addr, "actual", fallback.Addr().String())
+	return fallback, nil
+}
+
+// isAddrInUse reports a "port already taken" bind error. On Unix this is
+// EADDRINUSE; Windows WinSock reports WSAEADDRINUSE (10048), whose numeric
+// value differs from syscall.EADDRINUSE on that platform.
+func isAddrInUse(err error) bool {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return runtime.GOOS == "windows" && errno == 10048 // WSAEADDRINUSE
+	}
+	return false
 }

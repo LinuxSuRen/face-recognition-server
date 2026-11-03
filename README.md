@@ -71,7 +71,7 @@ release in one go.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `FACE_RECOGNITION_ADDR` | `:8080` | HTTP listen address |
+| `FACE_RECOGNITION_ADDR` | `:8080` | HTTP listen address; when the port is already in use the server logs a warning and drifts to a free OS-assigned port on the same host |
 | `FACE_RECOGNITION_DB` | `data/faces.sqlite3` | SQLite database file |
 | `FACE_RECOGNITION_MODELS` | `models` | directory with the ONNX models |
 | `FACE_RECOGNITION_ORT_LIB` | platform default | path to the onnxruntime shared library |
