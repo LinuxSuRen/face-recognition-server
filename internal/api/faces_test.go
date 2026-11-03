@@ -56,7 +56,7 @@ func goodFace() engine.ExtractedFace {
 			BBoxXYXY: [4]float32{50, 50, 350, 350},
 			Score:    0.96,
 		},
-		Quality: engine.Quality{Accepted: true, Score: 0.93, FaceSize: 300, BlurVariance: 500},
+		Quality:   engine.Quality{Accepted: true, Score: 0.93, FaceSize: 300, BlurVariance: 500},
 		Embedding: []float32{1, 0, 0, 0},
 	}
 }

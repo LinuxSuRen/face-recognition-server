@@ -19,12 +19,12 @@ import (
 type Status string
 
 const (
-	StatusConnecting    Status = "connecting"
-	StatusLive          Status = "live"
-	StatusReconnecting  Status = "reconnecting"
-	StatusFailed        Status = "failed"
-	StatusExpired       Status = "expired"
-	StatusStopped       Status = "stopped"
+	StatusConnecting   Status = "connecting"
+	StatusLive         Status = "live"
+	StatusReconnecting Status = "reconnecting"
+	StatusFailed       Status = "failed"
+	StatusExpired      Status = "expired"
+	StatusStopped      Status = "stopped"
 )
 
 // Analyzer processes one decoded frame together with the original JPEG
@@ -49,20 +49,20 @@ type Event struct {
 
 // SessionOptions tunes one session.
 type SessionOptions struct {
-	URL            string
-	Transport      string
-	Analyzer       Analyzer
-	Logger         *slog.Logger
-	IdleTimeout    time.Duration
-	ReconnectMax   int
-	AnalysisEvery  time.Duration
+	URL           string
+	Transport     string
+	Analyzer      Analyzer
+	Logger        *slog.Logger
+	IdleTimeout   time.Duration
+	ReconnectMax  int
+	AnalysisEvery time.Duration
 	// sourceFactory starts the frame producer (overridden in tests).
 	sourceFactory func(ctx context.Context) (<-chan []byte, error)
 }
 
 // Session is one live analysis view of an RTSP source.
 type Session struct {
-	id string
+	id   string
 	opts SessionOptions
 
 	mu           sync.Mutex
@@ -96,14 +96,14 @@ func newSession(opts SessionOptions) *Session {
 	id := make([]byte, 8)
 	rand.Read(id)
 	return &Session{
-		id:          hex.EncodeToString(id),
-		opts:        opts,
-		status:      StatusConnecting,
-		detail:      "正在连接 RTSP 摄像机",
-		subscribers: map[chan Event]struct{}{},
+		id:           hex.EncodeToString(id),
+		opts:         opts,
+		status:       StatusConnecting,
+		detail:       "正在连接 RTSP 摄像机",
+		subscribers:  map[chan Event]struct{}{},
 		lastActivity: time.Now(),
-		startedAt:   time.Now(),
-		done:        make(chan struct{}),
+		startedAt:    time.Now(),
+		done:         make(chan struct{}),
 	}
 }
 
@@ -112,12 +112,12 @@ func (s *Session) ID() string { return s.id }
 
 // Snapshot is a consistent view for API responses.
 type Snapshot struct {
-	ID          string         `json:"session_id"`
-	Status      Status         `json:"status"`
-	Detail      string         `json:"detail"`
-	Seq         uint64         `json:"seq"`
-	StartedAt   string         `json:"started_at"`
-	LastEventAt string         `json:"last_event_at"`
+	ID          string `json:"session_id"`
+	Status      Status `json:"status"`
+	Detail      string `json:"detail"`
+	Seq         uint64 `json:"seq"`
+	StartedAt   string `json:"started_at"`
+	LastEventAt string `json:"last_event_at"`
 	// Enrollment carries the enrollment controller state when present.
 	Enrollment map[string]any `json:"enrollment,omitempty"`
 }

@@ -120,7 +120,7 @@ func extractedFace(size float32, qualityOK bool, embedding []float32) engine.Ext
 			BBoxXYXY: [4]float32{10, 10, 10 + size, 10 + size},
 			Score:    0.95,
 		},
-		Quality: engine.Quality{Accepted: accepted, Score: 0.9, Reasons: reasons},
+		Quality:   engine.Quality{Accepted: accepted, Score: 0.9, Reasons: reasons},
 		Embedding: embedding,
 	}
 }

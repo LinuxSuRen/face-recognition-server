@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"image"
-	"image/jpeg"
 	_ "image/gif"
+	"image/jpeg"
 	_ "image/png"
 
 	"golang.org/x/image/webp"

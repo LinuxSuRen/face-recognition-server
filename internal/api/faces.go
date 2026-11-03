@@ -315,18 +315,18 @@ func (api *facesAPI) deleteSample(w http.ResponseWriter, r *http.Request) {
 // ---- recognition ----
 
 type faceQualityPayload struct {
-	Accepted      bool     `json:"accepted"`
-	Score         float64  `json:"score"`
-	Reasons       []string `json:"reasons"`
-	BlurVariance  float64  `json:"blur_variance"`
-	FaceSize      int      `json:"face_size"`
+	Accepted     bool     `json:"accepted"`
+	Score        float64  `json:"score"`
+	Reasons      []string `json:"reasons"`
+	BlurVariance float64  `json:"blur_variance"`
+	FaceSize     int      `json:"face_size"`
 }
 
 type facePayload struct {
-	ID          int     `json:"id"`
-	ClassName   string  `json:"class_name"`
-	Confidence  float64 `json:"confidence"`
-	BBoxXYXY    [4]float32 `json:"bbox_xyxy"`
+	ID         int        `json:"id"`
+	ClassName  string     `json:"class_name"`
+	Confidence float64    `json:"confidence"`
+	BBoxXYXY   [4]float32 `json:"bbox_xyxy"`
 	recognizer.Result
 	Quality faceQualityPayload `json:"quality"`
 }

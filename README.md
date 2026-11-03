@@ -1,48 +1,57 @@
 # face-recognition-server
 
-Standalone face recognition service written in **Go + Vue 3**, built on the
+Standalone face recognition service written in **Go + Vue 3**, built on
 [ONNX Runtime](https://onnxruntime.ai/) inference of two open models from the
 Apache-2.0 licensed [opencv_zoo](https://github.com/opencv/opencv_zoo):
 
 | Model | Role |
 | --- | --- |
-| [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) | face detection (5-point landmarks) |
+| [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) | face detection with 5-point landmarks |
 | [SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) | face embedding / recognition |
 
-The project keeps the whole pipeline — detection decoding, NMS, landmark
-alignment, embeddings and matching — in pure Go on top of the ONNX Runtime C
-API, so the server ships as one binary plus one shared library. Employee
-profiles and face templates live in a single SQLite file; enrollment images
-are stored as samples and converted to normalized embeddings.
+The whole pipeline — detection decoding, NMS, landmark alignment, embedding
+post-processing and matching — is pure Go on top of the ONNX Runtime C API.
+Employee profiles and face samples live in one SQLite file; enrollment
+images are stored with their 128-d normalized embeddings.
 
 ## Features
 
-- Employee face library management (REST + Vue UI): profiles, sample upload,
-  deletion, previews.
-- Image recognition: multi-face detection with known / unknown verdicts and
-  similarity scores.
-- Quality gating on enrollment: minimum face size, face area ratio, blur.
-- RTSP live recognition and enrollment with a manual first-sample
-  confirmation.
+- **Face library management** (REST + Vue UI): employee profiles, sample
+  upload, camera capture, deletion, previews.
+- **Image recognition**: multi-face detection with known / unknown verdicts,
+  similarity scores and quality-aware `unusable` classification.
+- **Enrollment quality gates**: minimum face size (48 px), area ratio
+  (≥ 1.5%), Laplacian blur, single-person check, and a consistency floor
+  against the employee's existing samples (cosine ≥ 0.35).
+- **RTSP live recognition** over SSE: ffmpeg pulls the stream, the server
+  analyzes the latest frame at its own pace, the browser renders boxes with
+  zero polling.
+- **RTSP enrollment**: the first qualified face requires a manual
+  confirmation, then up to 5 samples are auto-collected with pose hints, a
+  2-second minimum interval and similarity-based skipping.
 
 ## Quick start
 
 ```bash
 # 1. download the ONNX models (~38 MB total, into ./models)
-./scripts/download-models.sh        # or scripts/download-models.ps1 on Windows
+./scripts/download-models.sh          # or scripts/download-models.ps1
 
-# 2. build & run (CGO + onnxruntime shared library required for inference)
+# 2. build & run (CGO + onnxruntime shared library + ffmpeg for RTSP)
 make build && ./bin/server
 
 # open http://localhost:8080
 ```
 
-Docker:
+Docker (models and the ONNX Runtime library are baked into the image):
 
 ```bash
 docker build -t face-recognition-server .
 docker run -p 8080:8080 -v face-data:/app/data face-recognition-server
 ```
+
+> The onnxruntime shared library version must match the one expected by
+> [onnxruntime_go](https://github.com/yalue/onnxruntime_go) (1.31.0 at the
+> time of writing). `ffmpeg` must be on `PATH` for RTSP features.
 
 ## Configuration
 
@@ -50,22 +59,62 @@ docker run -p 8080:8080 -v face-data:/app/data face-recognition-server
 | --- | --- | --- |
 | `FACE_RECOGNITION_ADDR` | `:8080` | HTTP listen address |
 | `FACE_RECOGNITION_DB` | `data/faces.sqlite3` | SQLite database file |
-| `FACE_RECOGNITION_MODELS` | `models` | Directory with the ONNX models |
+| `FACE_RECOGNITION_MODELS` | `models` | directory with the ONNX models |
+| `FACE_RECOGNITION_ORT_LIB` | platform default | path to the onnxruntime shared library |
 | `FACE_RECOGNITION_KNOWN_THRESHOLD` | `0.45` | cosine similarity for a known face |
-| `FACE_RECOGNITION_UNKNOWN_THRESHOLD` | `0.30` | below this a face is reported unknown |
-| `FACE_RECOGNITION_MAX_IMAGE_MB` | `20` | upload size limit in MB |
+| `FACE_RECOGNITION_UNKNOWN_THRESHOLD` | `0.35` | below this a face is reported unknown |
+| `FACE_RECOGNITION_MAX_IMAGE_MB` | `10` | upload size limit in MB |
+
+## HTTP API
+
+All list endpoints share the pagination contract
+`data` / `page` / `total` / `page_size` with `page` starting at 1.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/healthz` | status, engine and database readiness |
+| POST / GET | `/api/v1/faces/employees` | create / page employees |
+| GET / PATCH / DELETE | `/api/v1/faces/employees/{id}` | detail (+ samples) / update / delete |
+| POST / GET | `/api/v1/faces/employees/{id}/samples` | upload / page face samples |
+| GET | `/api/v1/faces/employees/{id}/samples/{sid}/image` | sample image bytes |
+| DELETE | `/api/v1/faces/employees/{id}/samples/{sid}` | delete one sample |
+| POST | `/api/v1/faces/recognize` | multipart `image` → faces + summary |
+| GET / PUT | `/api/v1/rtsp/configuration` | RTSP source URL and transport |
+| POST | `/api/v1/rtsp/sessions` | start a session, `{mode:"enroll",employee_id}` optional |
+| GET | `/api/v1/rtsp/sessions/{id}` | session snapshot |
+| GET | `/api/v1/rtsp/sessions/{id}/events` | SSE: state + analyzed frames |
+| POST | `/api/v1/rtsp/sessions/{id}/confirm` | confirm the first enrollment face |
+| DELETE | `/api/v1/rtsp/sessions/{id}` | stop the session |
+
+The UI communicates the same contract in Chinese; backend errors carry
+stable English `detail` phrases that the frontend maps to friendly copy.
+
+## Architecture
+
+```
+cmd/server            entrypoint: config, store, engine (best effort), HTTP
+internal/engine       pure-Go pipeline: YuNet decode/NMS, SFace alignment,
+                      quality gates, image decode/encode
+internal/engine/onnxrt  ONNX Runtime binding (cgo build tag + factory)
+internal/recognizer   matching (max-template cosine) + enrollment selection
+internal/store        SQLite registry (employees + face_templates)
+internal/api          HTTP handlers, SSE, RTSP enrollment controller
+internal/rtsp         ffmpeg subprocess, latest-frame sessions, events
+web/                  Vue 3 + Vite UI, embedded into the binary
+```
+
+Without CGO the server still builds and serves health + UI + profile
+management; recognition endpoints report the engine as unavailable.
 
 ## Development
 
 ```bash
-make test-nocgo   # pure-Go unit tests, no C toolchain needed
+make test-nocgo             # pure-Go unit tests, no C toolchain needed
 make vet
-make web-install web-build   # Vue 3 + Vite frontend
+make web-install web-build  # Vue 3 + Vite frontend
+make build                  # full binary (CGO + onnxruntime)
+go test -tags integration ./internal/engine/...   # real-model tests
 ```
-
-The inference adapter is isolated behind a `cgo` build tag: without a C
-compiler the server still builds and serves the UI, and recognition endpoints
-report that the engine is unavailable.
 
 ## License
 

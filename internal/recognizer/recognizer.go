@@ -32,9 +32,9 @@ type Result struct {
 	// Status is known, unknown or unusable.
 	Status string `json:"recognition_status"`
 	// EmployeeID, EmployeeNo and Name are set for known faces.
-	EmployeeID   int64  `json:"employee_id,omitempty"`
-	EmployeeNo   string `json:"employee_no,omitempty"`
-	Name         string `json:"name,omitempty"`
+	EmployeeID int64  `json:"employee_id,omitempty"`
+	EmployeeNo string `json:"employee_no,omitempty"`
+	Name       string `json:"name,omitempty"`
 	// Similarity is the best employee's max-template cosine.
 	Similarity float64 `json:"similarity"`
 	// Candidate fields always describe the best employee, even when the
@@ -51,10 +51,10 @@ type Result struct {
 // Match ranks employees for one embedding and applies the thresholds.
 func Match(embedding []float32, templates []Template, thresholds Thresholds) Result {
 	type employeeScore struct {
-		id     int64
-		no     string
-		name   string
-		score  float64
+		id    int64
+		no    string
+		name  string
+		score float64
 	}
 	query := normalize(embedding)
 	if query == nil {

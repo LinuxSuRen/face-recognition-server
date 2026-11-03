@@ -116,7 +116,7 @@ func (api *rtspAPI) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	options := rtsp.SessionOptions{
-		Logger:   api.faces.logger,
+		Logger: api.faces.logger,
 		Analyzer: func(ctx context.Context, img *engine.Image, _ []byte) (any, error) {
 			return api.faces.analyze(ctx, img)
 		},

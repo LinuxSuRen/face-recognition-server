@@ -57,17 +57,17 @@ func initializeEnvironment() error {
 type ortEngine struct {
 	opts engine.Options
 
-	detectorMu           sync.Mutex
-	detector             *ort.DynamicAdvancedSession
-	detectorInput        *ort.Tensor[float32]
-	detectorInputWidth   int
-	detectorInputHeight  int
+	detectorMu          sync.Mutex
+	detector            *ort.DynamicAdvancedSession
+	detectorInput       *ort.Tensor[float32]
+	detectorInputWidth  int
+	detectorInputHeight int
 
-	recognizerMu         sync.Mutex
-	recognizer           *ort.DynamicAdvancedSession
-	recognizerInput      *ort.Tensor[float32]
+	recognizerMu    sync.Mutex
+	recognizer      *ort.DynamicAdvancedSession
+	recognizerInput *ort.Tensor[float32]
 
-	modelVersion         string
+	modelVersion string
 }
 
 // New builds the engine from the YuNet and SFace ONNX files. Options arrive

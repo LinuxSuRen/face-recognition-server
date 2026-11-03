@@ -7,7 +7,7 @@ const blurReferenceSize = 224
 
 // embeddingBlockingReasons fail hard gates that alignment cannot rescue.
 var embeddingBlockingReasons = map[string]bool{
-	"face_too_small":     true,
+	"face_too_small":      true,
 	"face_area_too_small": true,
 }
 

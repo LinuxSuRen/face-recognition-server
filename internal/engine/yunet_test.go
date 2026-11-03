@@ -18,10 +18,10 @@ func yunetRow(x, y, w, h float32, score float32, landmarkStart float32) []float3
 
 func TestDecodeYuNetFiltersAndScales(t *testing.T) {
 	rows := []float32{}
-	rows = append(rows, yunetRow(50, 60, 100, 120, 0.95, 200)...)  // keep
-	rows = append(rows, yunetRow(10, 10, 40, 40, 0.10, 100)...)    // below threshold
+	rows = append(rows, yunetRow(50, 60, 100, 120, 0.95, 200)...)            // keep
+	rows = append(rows, yunetRow(10, 10, 40, 40, 0.10, 100)...)              // below threshold
 	rows = append(rows, yunetRow(0, 0, float32(math.NaN()), 10, 0.99, 0)...) // degenerate
-	rows = append(rows, yunetRow(300, 300, 80, 80, 0.85, 350)...)  // keep
+	rows = append(rows, yunetRow(300, 300, 80, 80, 0.85, 350)...)            // keep
 
 	faces := decodeYuNet(rows, 0.5, 0.8, 0.3, 50)
 	if len(faces) != 2 {

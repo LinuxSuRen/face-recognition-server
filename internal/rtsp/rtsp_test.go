@@ -49,7 +49,7 @@ func TestSessionStreamsFramesAndAnalysis(t *testing.T) {
 	frame := testJPEG(t, 32, 24)
 	var analyzed atomic.Int64
 	opts := SessionOptions{
-		URL:           "rtsp://example/test",
+		URL: "rtsp://example/test",
 		Analyzer: func(_ context.Context, img *engine.Image, _ []byte) (any, error) {
 			analyzed.Add(1)
 			return map[string]any{"width": img.Width, "height": img.Height}, nil
