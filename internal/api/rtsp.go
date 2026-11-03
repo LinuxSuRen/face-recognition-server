@@ -133,7 +133,9 @@ func (api *rtspAPI) createSession(w http.ResponseWriter, r *http.Request) {
 		options.Analyzer = nil // installed after creation below
 	}
 
-	session, err := api.manager.Create(r.Context(), options)
+	// the session outlives this HTTP request; its lifecycle is owned by
+	// the manager (stopped via DELETE or StopAll on shutdown)
+	session, err := api.manager.Create(context.Background(), options)
 	if err != nil {
 		switch {
 		case errors.Is(err, rtsp.ErrSourceNotConfigured):

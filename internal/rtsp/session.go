@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,7 +58,7 @@ type SessionOptions struct {
 	ReconnectMax  int
 	AnalysisEvery time.Duration
 	// sourceFactory starts the frame producer (overridden in tests).
-	sourceFactory func(ctx context.Context) (<-chan []byte, error)
+	sourceFactory func(ctx context.Context) (frameFeed, error)
 }
 
 // Session is one live analysis view of an RTSP source.
@@ -220,7 +221,7 @@ func (s *Session) readerLoop(ctx context.Context) {
 		default:
 		}
 		attempt++
-		frames, err := s.opts.sourceFactory(ctx)
+		feed, err := s.opts.sourceFactory(ctx)
 		if err != nil {
 			if attempt > s.opts.ReconnectMax {
 				s.setStatus(StatusFailed, "RTSP 连接失败，已停止重试")
@@ -233,7 +234,7 @@ func (s *Session) readerLoop(ctx context.Context) {
 			continue
 		}
 		s.setStatus(StatusLive, "RTSP 已连接，正在等待画面")
-		for frame := range frames {
+		for frame := range feed.frames {
 			s.mu.Lock()
 			s.latestJPEG = frame
 			s.latestSeq++
@@ -245,7 +246,11 @@ func (s *Session) readerLoop(ctx context.Context) {
 		default:
 		}
 		if attempt > s.opts.ReconnectMax {
-			s.setStatus(StatusFailed, "RTSP 流中断，已停止重试")
+			detail := "RTSP 流中断，已停止重试"
+			if tail := strings.TrimSpace(feed.stderrTail()); tail != "" {
+				detail += "：" + tail
+			}
+			s.setStatus(StatusFailed, detail)
 			return
 		}
 		s.setStatus(StatusReconnecting, "RTSP 流中断，正在重连")

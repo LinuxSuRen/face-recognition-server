@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -292,26 +293,55 @@ func TestE2ERTSPRecognize(t *testing.T) {
 		t.Fatalf("sample upload status = %d", status)
 	}
 
-	// a local ffmpeg RTSP server looping the photo
+	// a MediaMTX instance serves the looped photo as an H.264 RTSP stream;
+	// ffmpeg listen-mode is unreliable and MJPEG-over-RTSP gets torn down,
+	// so the test uses the same media gateway real deployments use
+	mediamtx := findMediaMTX(t)
 	rtspPort := freePort(t)
+	rtpPort := mustPort(t)
+	rtpPort -= rtpPort % 2 // RTP must be even, RTCP is RTP+1
+	config := fmt.Sprintf("rtspAddress: 127.0.0.1:%s\nrtpAddress: 127.0.0.1:%d\n"+
+		"rtcpAddress: 127.0.0.1:%d\nrtmp: no\nhls: no\nwebrtc: no\n"+
+		"paths:\n  all:\n    source: publisher\n",
+		rtspPort, rtpPort, rtpPort+1)
+	configPath := filepath.Join(t.TempDir(), "mediamtx.yml")
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("writing mediamtx config: %v", err)
+	}
+	gateway := exec.Command(mediamtx, configPath)
+	var gatewayLog syncBuffer
+	gateway.Stdout, gateway.Stderr = &gatewayLog, &gatewayLog
+	if err := gateway.Start(); err != nil {
+		t.Fatalf("starting mediamtx: %v", err)
+	}
+	t.Cleanup(func() {
+		gateway.Process.Kill()
+		gateway.Wait()
+	})
+
 	stream := exec.Command("ffmpeg",
 		"-loglevel", "warning",
-		"-re", "-stream_loop", "-1", "-i", filepath.Join(os.TempDir(),
+		"-re", "-loop", "1", "-i", filepath.Join(os.TempDir(),
 			"face-recognition-server-testdata", "lena.jpg"),
 		"-vf", "fps=5",
-		"-c:v", "mjpeg", "-q:v", "5",
-		"-f", "rtsp", "-rtsp_flags", "listen",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p",
+		"-preset", "ultrafast", "-tune", "zerolatency", "-g", "10",
+		"-f", "rtsp", "-t", "600",
 		"rtsp://127.0.0.1:"+rtspPort+"/e2e",
 	)
 	var streamErr bytes.Buffer
 	stream.Stderr = &streamErr
 	if err := stream.Start(); err != nil {
-		t.Fatalf("starting rtsp server (ffmpeg installed?): %v", err)
+		t.Fatalf("starting rtsp push (ffmpeg installed?): %v", err)
 	}
 	t.Cleanup(func() {
 		stream.Process.Kill()
 		stream.Wait()
 	})
+	if !gatewayLog.waitFor("is publishing to path", 20*time.Second) {
+		t.Fatalf("rtsp push never published; mediamtx:\n%s\nffmpeg:\n%s",
+			gatewayLog.String(), streamErr.String())
+	}
 
 	status, _ = postJSON(t, "PUT", server.baseURL+"/api/v1/rtsp/configuration",
 		map[string]any{"url": "rtsp://127.0.0.1:" + rtspPort + "/e2e", "transport": "tcp"})
@@ -331,8 +361,64 @@ func TestE2ERTSPRecognize(t *testing.T) {
 
 	recognized := waitForKnownFace(t, server.baseURL+"/api/v1/rtsp/sessions/"+sessionID+"/events", 90*time.Second)
 	if !recognized {
-		t.Fatalf("live stream never produced a known face; ffmpeg:\n%s", streamErr.String())
+		t.Fatalf("live stream never produced a known face; mediamtx:\n%s\nffmpeg:\n%s",
+			gatewayLog.String(), streamErr.String())
 	}
+}
+
+// findMediaMTX resolves the mediamtx binary or skips the test.
+func findMediaMTX(t *testing.T) string {
+	t.Helper()
+	if custom := os.Getenv("FRS_MEDIAMTX_BIN"); custom != "" {
+		if _, err := os.Stat(custom); err == nil {
+			return custom
+		}
+	}
+	if path, err := exec.LookPath("mediamtx"); err == nil {
+		return path
+	}
+	t.Skip("mediamtx not found; set FRS_MEDIAMTX_BIN or add it to PATH")
+	return ""
+}
+
+// mustPort reserves a free port (numbers only; no listener kept).
+func mustPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving port: %v", err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+// syncBuffer is a mutex-guarded buffer that can be awaited for a pattern.
+type syncBuffer struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.String()
+}
+
+func (b *syncBuffer) waitFor(pattern string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(b.String(), pattern) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return strings.Contains(b.String(), pattern)
 }
 
 // waitForKnownFace consumes the SSE feed until a frame reports a known face.

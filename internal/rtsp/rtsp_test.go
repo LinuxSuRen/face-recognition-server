@@ -56,7 +56,7 @@ func TestSessionStreamsFramesAndAnalysis(t *testing.T) {
 		},
 		AnalysisEvery: 20 * time.Millisecond,
 		IdleTimeout:   time.Hour,
-		sourceFactory: func(ctx context.Context) (<-chan []byte, error) {
+		sourceFactory: func(ctx context.Context) (frameFeed, error) {
 			return (&fakeSource{frames: [][]byte{frame}, interval: 30 * time.Millisecond}).start(ctx)
 		},
 	}
@@ -109,7 +109,7 @@ func TestSessionExpiresWhenIdle(t *testing.T) {
 		Analyzer:      nil,
 		AnalysisEvery: time.Hour, // no analysis activity
 		IdleTimeout:   120 * time.Millisecond,
-		sourceFactory: func(ctx context.Context) (<-chan []byte, error) {
+		sourceFactory: func(ctx context.Context) (frameFeed, error) {
 			return (&fakeSource{frames: [][]byte{testJPEG(t, 8, 8)}, interval: time.Hour}).start(ctx)
 		},
 	}
@@ -136,7 +136,7 @@ func TestManagerLifecycle(t *testing.T) {
 		URL:           "rtsp://example/test",
 		AnalysisEvery: time.Hour,
 		IdleTimeout:   time.Hour,
-		sourceFactory: func(ctx context.Context) (<-chan []byte, error) {
+		sourceFactory: func(ctx context.Context) (frameFeed, error) {
 			return (&fakeSource{frames: [][]byte{testJPEG(t, 8, 8)}}).start(ctx)
 		},
 	}
