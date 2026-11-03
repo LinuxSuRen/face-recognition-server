@@ -1,0 +1,26 @@
+# Binaries
+bin/
+web/dist/
+*.exe
+
+# Local full-UI builds: only the committed placeholder is tracked, the
+# copied web/dist output is not (see internal/httpui)
+internal/httpui/dist/*
+!internal/httpui/dist/index.html
+
+# Runtime data and models (downloaded via scripts/download-models)
+data/
+models/
+
+# Local third-party artifacts (onnxruntime archive for CGO builds)
+third_party/
+
+# Node
+web/node_modules/
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
