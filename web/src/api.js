@@ -18,4 +18,46 @@ async function request(path, options = {}) {
   return data
 }
 
+function queryString(params = {}) {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) {
+      search.set(key, value)
+    }
+  }
+  const text = search.toString()
+  return text ? `?${text}` : ''
+}
+
 export const api = {request}
+
+export const facesApi = {
+  listEmployees(params) {
+    return request(`/api/v1/faces/employees${queryString(params)}`)
+  },
+  createEmployee(body) {
+    return request('/api/v1/faces/employees', {method: 'POST', body: JSON.stringify(body)})
+  },
+  updateEmployee(id, body) {
+    return request(`/api/v1/faces/employees/${id}`, {method: 'PATCH', body: JSON.stringify(body)})
+  },
+  deleteEmployee(id) {
+    return request(`/api/v1/faces/employees/${id}`, {method: 'DELETE'})
+  },
+  listSamples(employeeId) {
+    return request(`/api/v1/faces/employees/${employeeId}/samples`)
+  },
+  uploadSample(employeeId, file) {
+    const form = new FormData()
+    form.append('file', file)
+    return request(`/api/v1/faces/employees/${employeeId}/samples`, {method: 'POST', body: form})
+  },
+  deleteSample(employeeId, sampleId) {
+    return request(`/api/v1/faces/employees/${employeeId}/samples/${sampleId}`, {method: 'DELETE'})
+  },
+  recognize(file) {
+    const form = new FormData()
+    form.append('image', file)
+    return request('/api/v1/faces/recognize', {method: 'POST', body: form})
+  },
+}
