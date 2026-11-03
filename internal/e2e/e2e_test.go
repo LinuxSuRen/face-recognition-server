@@ -113,7 +113,10 @@ type serverProcess struct {
 	baseURL string
 	command *exec.Cmd
 	stderr  bytes.Buffer
+	cookie  string
 }
+
+const e2eAdminPassword = "e2e-admin-pass"
 
 func startServer(t *testing.T) *serverProcess {
 	t.Helper()
@@ -125,6 +128,7 @@ func startServer(t *testing.T) *serverProcess {
 	command.Env = append(os.Environ(),
 		"FACE_RECOGNITION_ADDR=127.0.0.1:"+port,
 		"FACE_RECOGNITION_DB="+filepath.Join(dir, "faces.sqlite3"),
+		"FACE_RECOGNITION_ADMIN_PASSWORD="+e2eAdminPassword,
 	)
 	if err := command.Start(); err != nil {
 		t.Fatalf("starting server: %v", err)
@@ -139,7 +143,32 @@ func startServer(t *testing.T) *serverProcess {
 		command.Wait()
 	})
 	waitHealthy(t, process)
+	loginServer(t, process)
 	return process
+}
+
+// loginServer authenticates the bootstrap admin so management calls pass
+// the session guard.
+func loginServer(t *testing.T, process *serverProcess) {
+	t.Helper()
+	body := fmt.Sprintf(`{"username":"admin","password":%q}`, e2eAdminPassword)
+	response, err := http.Post(process.baseURL+"/api/v1/auth/login",
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("login request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d: session auth blocks the e2e flow", response.StatusCode)
+	}
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "frs_session" {
+			process.cookie = cookie.Value
+		}
+	}
+	if process.cookie == "" {
+		t.Fatalf("login did not set the session cookie")
+	}
 }
 
 func waitHealthy(t *testing.T, process *serverProcess) {
@@ -184,21 +213,22 @@ func freePort(t *testing.T) string {
 	return fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
 }
 
-func postJSON(t *testing.T, method, url string, body any) (int, map[string]any) {
+func postJSON(t *testing.T, server *serverProcess, method, path string, body any) (int, map[string]any) {
 	t.Helper()
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshaling: %v", err)
 	}
-	request, err := http.NewRequest(method, url, bytes.NewReader(encoded))
+	request, err := http.NewRequest(method, server.baseURL+path, bytes.NewReader(encoded))
 	if err != nil {
 		t.Fatalf("building request: %v", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	attachSession(request, server)
 	return doRequest(t, request)
 }
 
-func postFile(t *testing.T, url, field string, content []byte) (int, map[string]any) {
+func postFile(t *testing.T, server *serverProcess, path, field string, content []byte) (int, map[string]any) {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -210,12 +240,20 @@ func postFile(t *testing.T, url, field string, content []byte) (int, map[string]
 		t.Fatalf("writing form file: %v", err)
 	}
 	writer.Close()
-	request, err := http.NewRequest("POST", url, &body)
+	request, err := http.NewRequest("POST", server.baseURL+path, &body)
 	if err != nil {
 		t.Fatalf("building request: %v", err)
 	}
 	request.Header.Set("Content-Type", writer.FormDataContentType())
+	attachSession(request, server)
 	return doRequest(t, request)
+}
+
+// attachSession carries the admin cookie on management calls.
+func attachSession(request *http.Request, server *serverProcess) {
+	if server.cookie != "" {
+		request.AddCookie(&http.Cookie{Name: "frs_session", Value: server.cookie})
+	}
 }
 
 func doRequest(t *testing.T, request *http.Request) (int, map[string]any) {
@@ -241,15 +279,15 @@ func doRequest(t *testing.T, request *http.Request) (int, map[string]any) {
 func TestE2EFacesFlow(t *testing.T) {
 	server := startServer(t)
 
-	status, employee := postJSON(t, "POST", server.baseURL+"/api/v1/faces/employees",
+	status, employee := postJSON(t, server, "POST", "/api/v1/faces/employees",
 		map[string]any{"employee_no": "E2E001", "name": "端到端员工"})
 	if status != http.StatusCreated {
 		t.Fatalf("create employee status = %d: %v", status, employee)
 	}
 	employeeID := int64(employee["id"].(float64))
 
-	status, sample := postFile(t,
-		fmt.Sprintf("%s/api/v1/faces/employees/%d/samples", server.baseURL, employeeID),
+	status, sample := postFile(t, server,
+		fmt.Sprintf("/api/v1/faces/employees/%d/samples", employeeID),
 		"file", sampleImg)
 	if status != http.StatusCreated {
 		t.Fatalf("sample upload status = %d: %v", status, sample)
@@ -258,7 +296,7 @@ func TestE2EFacesFlow(t *testing.T) {
 		t.Fatalf("unexpected sample payload: %v", sample)
 	}
 
-	status, recognition := postFile(t, server.baseURL+"/api/v1/faces/recognize",
+	status, recognition := postFile(t, server, "/api/v1/faces/recognize",
 		"image", sampleImg)
 	if status != http.StatusOK {
 		t.Fatalf("recognize status = %d: %v", status, recognition)
@@ -281,14 +319,14 @@ func TestE2ERTSPRecognize(t *testing.T) {
 	server := startServer(t)
 
 	// enroll the sample face first so the live stream can be recognized
-	status, employee := postJSON(t, "POST", server.baseURL+"/api/v1/faces/employees",
+	status, employee := postJSON(t, server, "POST", "/api/v1/faces/employees",
 		map[string]any{"employee_no": "E2E002", "name": "实时员工"})
 	if status != http.StatusCreated {
 		t.Fatalf("create employee status = %d: %v", status, employee)
 	}
 	employeeID := int64(employee["id"].(float64))
-	if status, _ = postFile(t,
-		fmt.Sprintf("%s/api/v1/faces/employees/%d/samples", server.baseURL, employeeID),
+	if status, _ = postFile(t, server,
+		fmt.Sprintf("/api/v1/faces/employees/%d/samples", employeeID),
 		"file", sampleImg); status != http.StatusCreated {
 		t.Fatalf("sample upload status = %d", status)
 	}
@@ -298,28 +336,45 @@ func TestE2ERTSPRecognize(t *testing.T) {
 	// so the test uses the same media gateway real deployments use
 	mediamtx := findMediaMTX(t)
 	rtspPort := freePort(t)
-	rtpPort := mustPort(t)
-	rtpPort -= rtpPort % 2 // RTP must be even, RTCP is RTP+1
-	config := fmt.Sprintf("rtspAddress: 127.0.0.1:%s\nrtpAddress: 127.0.0.1:%d\n"+
-		"rtcpAddress: 127.0.0.1:%d\nrtmp: no\nhls: no\nwebrtc: no\n"+
-		"paths:\n  all:\n    source: publisher\n",
-		rtspPort, rtpPort, rtpPort+1)
-	configPath := filepath.Join(t.TempDir(), "mediamtx.yml")
-	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
-		t.Fatalf("writing mediamtx config: %v", err)
+	// Windows reserved-port ranges can reject UDP binds; retry with fresh
+	// ports until the RTSP listener actually opens
+	var gateway *exec.Cmd
+	var gatewayLog *syncBuffer
+	var stream *exec.Cmd
+	var streamErr *bytes.Buffer
+	for attempt := 0; attempt < 10; attempt++ {
+		candidateRTP := mustPort(t)
+		candidateRTP -= candidateRTP % 2
+		config := fmt.Sprintf("rtspAddress: 127.0.0.1:%s\nrtpAddress: 127.0.0.1:%d\n"+
+			"rtcpAddress: 127.0.0.1:%d\nrtmp: no\nhls: no\nwebrtc: no\n"+
+			"paths:\n  all:\n    source: publisher\n",
+			rtspPort, candidateRTP, candidateRTP+1)
+		configPath := filepath.Join(t.TempDir(), "mediamtx.yml")
+		if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+			t.Fatalf("writing mediamtx config: %v", err)
+		}
+		candidate := exec.Command(mediamtx, configPath)
+		candidateLog := &syncBuffer{}
+		candidate.Stdout, candidate.Stderr = candidateLog, candidateLog
+		if err := candidate.Start(); err != nil {
+			t.Fatalf("starting mediamtx: %v", err)
+		}
+		if candidateLog.waitFor("RTSP] listener opened", 5*time.Second) {
+			gateway, gatewayLog = candidate, candidateLog
+			t.Cleanup(func() {
+				gateway.Process.Kill()
+				gateway.Wait()
+			})
+			break
+		}
+		candidate.Process.Kill()
+		candidate.Wait()
 	}
-	gateway := exec.Command(mediamtx, configPath)
-	var gatewayLog syncBuffer
-	gateway.Stdout, gateway.Stderr = &gatewayLog, &gatewayLog
-	if err := gateway.Start(); err != nil {
-		t.Fatalf("starting mediamtx: %v", err)
+	if gateway == nil {
+		t.Skip("mediamtx could not bind (UDP port ranges exhausted)")
 	}
-	t.Cleanup(func() {
-		gateway.Process.Kill()
-		gateway.Wait()
-	})
 
-	stream := exec.Command("ffmpeg",
+	stream = exec.Command("ffmpeg",
 		"-loglevel", "warning",
 		"-re", "-loop", "1", "-i", filepath.Join(os.TempDir(),
 			"face-recognition-server-testdata", "lena.jpg"),
@@ -329,8 +384,8 @@ func TestE2ERTSPRecognize(t *testing.T) {
 		"-f", "rtsp", "-t", "600",
 		"rtsp://127.0.0.1:"+rtspPort+"/e2e",
 	)
-	var streamErr bytes.Buffer
-	stream.Stderr = &streamErr
+	streamErr = &bytes.Buffer{}
+	stream.Stderr = streamErr
 	if err := stream.Start(); err != nil {
 		t.Fatalf("starting rtsp push (ffmpeg installed?): %v", err)
 	}
@@ -343,23 +398,25 @@ func TestE2ERTSPRecognize(t *testing.T) {
 			gatewayLog.String(), streamErr.String())
 	}
 
-	status, _ = postJSON(t, "PUT", server.baseURL+"/api/v1/rtsp/configuration",
+	status, _ = postJSON(t, server, "PUT", "/api/v1/rtsp/configuration",
 		map[string]any{"url": "rtsp://127.0.0.1:" + rtspPort + "/e2e", "transport": "tcp"})
 	if status != http.StatusOK {
 		t.Fatalf("rtsp configuration status = %d", status)
 	}
 
-	status, session := postJSON(t, "POST", server.baseURL+"/api/v1/rtsp/sessions", map[string]any{})
+	status, session := postJSON(t, server, "POST", "/api/v1/rtsp/sessions", map[string]any{})
 	if status != http.StatusCreated {
 		t.Fatalf("session create status = %d: %v", status, session)
 	}
 	sessionID := session["session_id"].(string)
 	t.Cleanup(func() {
 		request, _ := http.NewRequest("DELETE", server.baseURL+"/api/v1/rtsp/sessions/"+sessionID, nil)
+		attachSession(request, server)
 		http.DefaultClient.Do(request)
 	})
 
-	recognized := waitForKnownFace(t, server.baseURL+"/api/v1/rtsp/sessions/"+sessionID+"/events", 90*time.Second)
+	recognized := waitForKnownFace(t, server,
+		"/api/v1/rtsp/sessions/"+sessionID+"/events", 90*time.Second)
 	if !recognized {
 		t.Fatalf("live stream never produced a known face; mediamtx:\n%s\nffmpeg:\n%s",
 			gatewayLog.String(), streamErr.String())
@@ -422,12 +479,13 @@ func (b *syncBuffer) waitFor(pattern string, timeout time.Duration) bool {
 }
 
 // waitForKnownFace consumes the SSE feed until a frame reports a known face.
-func waitForKnownFace(t *testing.T, eventsURL string, timeout time.Duration) bool {
+func waitForKnownFace(t *testing.T, server *serverProcess, path string, timeout time.Duration) bool {
 	t.Helper()
-	request, err := http.NewRequest("GET", eventsURL, nil)
+	request, err := http.NewRequest("GET", server.baseURL+path, nil)
 	if err != nil {
 		t.Fatalf("building SSE request: %v", err)
 	}
+	attachSession(request, server)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	request = request.WithContext(ctx)
