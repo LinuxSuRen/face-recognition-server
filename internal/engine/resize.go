@@ -60,6 +60,15 @@ func boxOverlap(a1, a2, b1, b2 float64) float64 {
 	return hi - lo
 }
 
+// resizeAny resizes to the exact target using area filtering for shrink
+// and bicubic for growth, matching OpenCV's INTER_AREA/INTER_CUBIC split.
+func resizeAny(img *Image, width, height int) *Image {
+	if img.Width > width || img.Height > height {
+		return resizeArea(img, width, height)
+	}
+	return resizeBicubic(img, width, height)
+}
+
 // bicubicKernel is the cubic convolution kernel with a = -0.75, OpenCV's
 // INTER_CUBIC coefficient.
 func bicubicKernel(t float64) float64 {

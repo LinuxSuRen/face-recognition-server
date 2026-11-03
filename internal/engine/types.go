@@ -28,6 +28,12 @@ type Options struct {
 	// DetectorMaxSide downscales larger images before detection
 	// (default 1280; 0 keeps the module default).
 	DetectorMaxSide int
+	// DetectorFixedWidth/Height adapt to YuNet exports with a static input
+	// tensor (e.g. opencv_zoo 2023mar declares 640x640). The backend reads
+	// them from the model; 0/0 means dynamic input and DetectorMaxSide
+	// applies.
+	DetectorFixedWidth  int
+	DetectorFixedHeight int
 	// MinFaceSize is the hard minimum face edge in pixels (default 48).
 	MinFaceSize int
 	// MinFaceRatio is the minimum face-area / image-area ratio (default 0.015).

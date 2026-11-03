@@ -59,6 +59,7 @@ type ortEngine struct {
 	detectorInput       *ort.Tensor[float32]
 	detectorInputWidth  int
 	detectorInputHeight int
+	detectorOutputs     []string
 
 	recognizerMu    sync.Mutex
 	recognizer      *ort.DynamicAdvancedSession
@@ -87,12 +88,20 @@ func New(opts engine.Options) (engine.Engine, error) {
 		return nil, err
 	}
 
-	detectorInputName, detectorOutputName, err := firstInputOutputNames(opts.DetectorPath)
+	detectorInputName, detectorOutputNames, err := inputAndOutputNames(opts.DetectorPath)
 	if err != nil {
 		return nil, err
 	}
+	// static-input exports (opencv_zoo 2023mar: 640x640) must be fed the
+	// exact tensor shape; the pipeline then maps coordinates back per axis
+	if inputs, _, infoErr := ort.GetInputOutputInfo(opts.DetectorPath); infoErr == nil && len(inputs) > 0 {
+		if dims := inputs[0].Dimensions; len(dims) == 4 && dims[2] > 0 && dims[3] > 0 {
+			opts.DetectorFixedHeight = int(dims[2])
+			opts.DetectorFixedWidth = int(dims[3])
+		}
+	}
 	detector, err := ort.NewDynamicAdvancedSession(opts.DetectorPath,
-		[]string{detectorInputName}, []string{detectorOutputName}, nil)
+		[]string{detectorInputName}, detectorOutputNames, nil)
 	if err != nil {
 		return nil, fmt.Errorf("loading YuNet model %s: %w", opts.DetectorPath, err)
 	}
@@ -122,6 +131,7 @@ func New(opts engine.Options) (engine.Engine, error) {
 		opts:            opts,
 		detector:        detector,
 		detectorInput:   nil,
+		detectorOutputs: detectorOutputNames,
 		recognizer:      recognizer,
 		recognizerInput: recognizerInput,
 		modelVersion:    modelVersion(opts.RecognizerPath),
@@ -153,9 +163,9 @@ func (e *ortEngine) Close() error {
 	return errors.Join(e.detector.Destroy(), e.recognizer.Destroy())
 }
 
-// detect feeds a RGB NCHW tensor through YuNet and returns the raw output
-// values plus the number of candidate rows.
-func (e *ortEngine) detect(input []float32, width, height int) ([]float32, int, error) {
+// detect feeds a RGB NCHW tensor through YuNet and returns the raw
+// multi-head output mapped by output name.
+func (e *ortEngine) detect(input []float32, width, height int) (*engine.YuNetHeads, error) {
 	e.detectorMu.Lock()
 	defer e.detectorMu.Unlock()
 
@@ -167,7 +177,7 @@ func (e *ortEngine) detect(input []float32, width, height int) ([]float32, int, 
 			ort.NewShape(1, 3, int64(height), int64(width)), input)
 		if err != nil {
 			e.detectorInput = nil
-			return nil, 0, fmt.Errorf("creating YuNet input tensor: %w", err)
+			return nil, fmt.Errorf("creating YuNet input tensor: %w", err)
 		}
 		e.detectorInput = tensor
 		e.detectorInputWidth = width
@@ -176,22 +186,58 @@ func (e *ortEngine) detect(input []float32, width, height int) ([]float32, int, 
 		copy(e.detectorInput.GetData(), input)
 	}
 
-	outputs := []ort.Value{nil}
+	outputs := make([]ort.Value, len(e.detectorOutputs))
 	if err := e.detector.Run([]ort.Value{e.detectorInput}, outputs); err != nil {
-		return nil, 0, fmt.Errorf("running YuNet: %w", err)
+		return nil, fmt.Errorf("running YuNet: %w", err)
 	}
-	output := outputs[0]
-	defer output.Destroy()
 
-	tensor, ok := output.(*ort.Tensor[float32])
-	if !ok {
-		return nil, 0, fmt.Errorf("unexpected YuNet output type %T", output)
+	heads := engine.NewYuNetHeads()
+	for index, output := range outputs {
+		if output == nil {
+			continue
+		}
+		tensor, ok := output.(*ort.Tensor[float32])
+		if !ok {
+			output.Destroy()
+			return nil, fmt.Errorf("unexpected YuNet output type %T", output)
+		}
+		applyHeadOutput(heads, e.detectorOutputs[index], tensor.GetData())
+		output.Destroy()
 	}
-	data := tensor.GetData()
-	// copy: the tensor owns the buffer only until Destroy
-	out := make([]float32, len(data))
-	copy(out, data)
-	return out, len(out) / engine.YunetRowStride, nil
+	return heads, nil
+}
+
+// applyHeadOutput routes one raw tensor into the heads by its name
+// (cls_8 / obj_16 / bbox_32 / kps_8 ...).
+func applyHeadOutput(heads *engine.YuNetHeads, name string, data []float32) {
+	kind, stride, ok := splitHeadName(name)
+	if !ok {
+		return
+	}
+	values := make([]float32, len(data))
+	copy(values, data)
+	switch kind {
+	case "cls":
+		heads.Cls[stride] = values
+	case "obj":
+		heads.Obj[stride] = values
+	case "bbox":
+		heads.Bbox[stride] = values
+	case "kps":
+		heads.Kps[stride] = values
+	}
+}
+
+// splitHeadName parses names like "cls_8" into the head kind and stride.
+func splitHeadName(name string) (string, int, bool) {
+	for _, stride := range []int{8, 16, 32} {
+		for _, kind := range []string{"cls", "obj", "bbox", "kps"} {
+			if name == kind+"_"+fmt.Sprint(stride) {
+				return kind, stride, true
+			}
+		}
+	}
+	return "", 0, false
 }
 
 // embed feeds an aligned 112x112 tensor through SFace and returns the raw
@@ -229,6 +275,23 @@ func firstInputOutputNames(modelPath string) (string, string, error) {
 		return "", "", fmt.Errorf("model %s has no inputs or no outputs", modelPath)
 	}
 	return inputs[0].Name, outputs[0].Name, nil
+}
+
+// inputAndOutputNames returns the first input and every output name (YuNet
+// exposes twelve raw heads: cls/obj/bbox/kps for strides 8/16/32).
+func inputAndOutputNames(modelPath string) (string, []string, error) {
+	inputs, outputs, err := ort.GetInputOutputInfo(modelPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading model io info %s: %w", modelPath, err)
+	}
+	if len(inputs) == 0 || len(outputs) == 0 {
+		return "", nil, fmt.Errorf("model %s has no inputs or no outputs", modelPath)
+	}
+	names := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		names = append(names, output.Name)
+	}
+	return inputs[0].Name, names, nil
 }
 
 func modelVersion(path string) string {

@@ -12,6 +12,9 @@ internal/httpui/dist/*
 data/
 models/
 
+# Local third-party artifacts (onnxruntime archive for CGO builds)
+third_party/
+
 # Node
 web/node_modules/
 
