@@ -1,8 +1,11 @@
 <script setup>
-import {computed, onMounted, onUnmounted, reactive, ref, watch} from 'vue'
+import {computed, nextTick, onMounted, onUnmounted, reactive, ref, watch} from 'vue'
 import {facesApi, rtspApi} from '../api'
 import {faceReasonText, formatScore, friendlyError} from '../errors'
 
+// sourceMode: 'rtsp' (server-side pull + SSE) or 'camera' (browser capture
+// feeding the recognize endpoint frame by frame)
+const sourceMode = ref('rtsp')
 const configuration = reactive({url: '', transport: 'tcp', configured: false, loaded: false})
 const session = reactive({id: null, status: 'idle', detail: ''})
 const faces = ref([])
@@ -18,10 +21,26 @@ const enrollment = reactive({state: '', saved_count: 0, target_samples: 5, candi
 
 const enrollReady = computed(() => mode.value === 'enroll' && employeeId.value)
 
+// ---- camera state ----
+const camera = reactive({running: false, starting: false, error: '', devices: [], deviceId: '', fps: 0})
+const cameraVideo = ref(null)
+let cameraStream = null
+let cameraTimer = null
+let cameraBusy = false
+
 function setNotice(text) {
   notice.value = text
   if (text) setTimeout(() => (notice.value === text ? (notice.value = '') : null), 5000)
 }
+
+watch(sourceMode, (value) => {
+  if (value === 'camera') {
+    mode.value = 'recognize' // enrollment is the RTSP flow
+    stopSession()
+  } else {
+    stopCamera()
+  }
+})
 
 async function loadConfiguration() {
   try {
@@ -150,6 +169,116 @@ async function stopSession() {
   session.detail = '会话已停止'
 }
 
+// ---- local camera flow ----
+
+function stopCameraMedia() {
+  if (cameraTimer) {
+    clearInterval(cameraTimer)
+    cameraTimer = null
+  }
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((track) => track.stop())
+    cameraStream = null
+  }
+}
+
+function stopCamera() {
+  stopCameraMedia()
+  camera.running = false
+  camera.fps = 0
+  faces.value = []
+  summary.value = null
+}
+
+async function openCamera(deviceId) {
+  stopCameraMedia()
+  camera.error = ''
+  camera.starting = true
+  const video = deviceId
+    ? {deviceId: {exact: deviceId}, width: {ideal: 1280}, height: {ideal: 720}}
+    : {width: {ideal: 1280}, height: {ideal: 720}}
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({video, audio: false})
+  } catch (error) {
+    camera.starting = false
+    camera.error = '无法访问摄像头，请检查浏览器权限或选择其他设备'
+    return
+  }
+  camera.running = true
+  camera.starting = false
+  await nextTick()
+  const element = cameraVideo.value
+  if (element) {
+    element.srcObject = cameraStream
+    try {
+      await element.play()
+    } catch (error) {
+      // autoplay guard: muted + playsinline should prevent this
+    }
+  }
+  await listCameraDevices()
+  faces.value = []
+  summary.value = null
+  cameraTimer = setInterval(recognizeCameraFrame, 800)
+}
+
+async function listCameraDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    camera.devices = devices
+      .filter((device) => device.kind === 'videoinput')
+      .map((device, index) => ({
+        deviceId: device.deviceId,
+        label: device.label || `摄像头 ${index + 1}`,
+      }))
+    const track = cameraStream && cameraStream.getVideoTracks()[0]
+    const settings = track && track.getSettings ? track.getSettings() : null
+    if (settings && settings.deviceId) {
+      camera.deviceId = settings.deviceId
+    }
+  } catch (error) {
+    // device labels need permission; not fatal
+  }
+}
+
+function switchCamera() {
+  if (camera.deviceId) {
+    openCamera(camera.deviceId)
+  }
+}
+
+async function recognizeCameraFrame() {
+  const element = cameraVideo.value
+  if (!element || !element.videoWidth || !cameraStream || cameraBusy) return
+  cameraBusy = true
+  const canvas = document.createElement('canvas')
+  canvas.width = element.videoWidth
+  canvas.height = element.videoHeight
+  canvas.getContext('2d').drawImage(element, 0, 0)
+  canvas.toBlob(async (blob) => {
+    try {
+      if (!blob) return
+      const result = await facesApi.recognize(
+        new File([blob], `live-${Date.now()}.jpg`, {type: 'image/jpeg'}))
+      faces.value = result.faces || []
+      summary.value = result.summary || null
+      camera.fps = faces.value.length
+      const overlay = document.getElementById('live-canvas')
+      if (overlay) {
+        overlay.width = element.videoWidth
+        overlay.height = element.videoHeight
+        drawOverlay(overlay)
+      }
+    } catch (error) {
+      camera.error = friendlyError(error)
+    } finally {
+      cameraBusy = false
+    }
+  }, 'image/jpeg', 0.85)
+}
+
+// ---- shared rendering ----
+
 function statusText(status) {
   const map = {
     idle: '未开始',
@@ -161,6 +290,13 @@ function statusText(status) {
     stopped: '会话已停止',
   }
   return map[status] || status
+}
+
+function effectiveStatus() {
+  if (sourceMode.value === 'camera') {
+    return camera.running ? 'live' : 'idle'
+  }
+  return session.status
 }
 
 function onFrameLoad(event) {
@@ -175,7 +311,7 @@ function onFrameLoad(event) {
 function drawOverlay(canvas) {
   const context = canvas.getContext('2d')
   context.clearRect(0, 0, canvas.width, canvas.height)
-  const enroll = mode.value === 'enroll'
+  const enroll = mode.value === 'enroll' && sourceMode.value === 'rtsp'
   for (const face of faces.value) {
     const [x1, y1, x2, y2] = face.bbox_xyxy || []
     if ([x1, y1, x2, y2].some((value) => typeof value !== 'number')) continue
@@ -218,6 +354,7 @@ function statusTitle(face) {
 onMounted(loadConfiguration)
 onUnmounted(() => {
   closeStream()
+  stopCamera()
   if (session.id) rtspApi.stopSession(session.id).catch(() => {})
 })
 </script>
@@ -225,43 +362,77 @@ onUnmounted(() => {
 <template>
   <div class="live-page">
     <p v-if="notice" class="notice">{{ notice }}</p>
+
     <section class="panel config">
       <h3>视频源</h3>
-      <div class="config-row">
-        <input
-          v-model="configuration.url"
-          placeholder="rtsp://user:pass@camera/stream"
-          spellcheck="false"
-        />
-        <select v-model="configuration.transport" aria-label="传输协议">
-          <option value="tcp">TCP（推荐）</option>
-          <option value="udp">UDP</option>
-        </select>
-        <button class="primary" @click="saveConfiguration">保存</button>
+      <div class="mode-row">
+        <label><input v-model="sourceMode" type="radio" value="rtsp" /> RTSP 网络流</label>
+        <label><input v-model="sourceMode" type="radio" value="camera" /> 本机摄像头</label>
       </div>
-      <p class="muted">
-        服务端通过 ffmpeg 拉流，只分析最新帧；建议使用 H.264 子码流，识别到的人脸过小时再切换主码流。
-      </p>
+      <template v-if="sourceMode === 'rtsp'">
+        <div class="config-row">
+          <input
+            v-model="configuration.url"
+            placeholder="rtsp://user:pass@camera/stream"
+            spellcheck="false"
+          />
+          <select v-model="configuration.transport" aria-label="传输协议">
+            <option value="tcp">TCP（推荐）</option>
+            <option value="udp">UDP</option>
+          </select>
+          <button class="primary" @click="saveConfiguration">保存</button>
+        </div>
+        <p class="muted">
+          服务端通过 ffmpeg 拉流，只分析最新帧；建议使用 H.264 子码流，识别到的人脸过小时再切换主码流。
+        </p>
+      </template>
+      <template v-else>
+        <div class="config-row">
+          <select
+            v-model="camera.deviceId"
+            aria-label="选择摄像头"
+            :disabled="!camera.devices.length || !camera.running"
+            @change="switchCamera"
+          >
+            <option v-if="!camera.devices.length" value="">启动摄像头后可选择设备</option>
+            <option v-for="device in camera.devices" :key="device.deviceId" :value="device.deviceId">
+              {{ device.label }}
+            </option>
+          </select>
+        </div>
+        <p class="muted">浏览器直接采集，每 0.8 秒识别一帧；多摄像头可在启动后从下拉切换。</p>
+      </template>
     </section>
 
     <section class="panel viewer">
       <header class="viewer-header">
         <h3>实时画面</h3>
         <div class="viewer-state">
-          <span class="dot" :class="session.status"></span>
-          <span>{{ statusText(session.status) }}<template v-if="session.detail"> · {{ session.detail }}</template></span>
+          <span class="dot" :class="effectiveStatus()"></span>
+          <span v-if="sourceMode === 'rtsp'">
+            {{ statusText(session.status) }}<template v-if="session.detail"> · {{ session.detail }}</template>
+          </span>
+          <span v-else>{{ camera.running ? '摄像头识别中' : (camera.starting ? '正在打开摄像头…' : '摄像头未启动') }}</span>
         </div>
         <div class="viewer-actions">
-          <button v-if="!session.id" class="primary" :disabled="!configuration.configured || (mode === 'enroll' && !enrollReady)" @click="startSession">
-            {{ mode === 'enroll' ? '开始录入' : '开始识别' }}
-          </button>
-          <button v-if="session.id && mode === 'enroll' && enrollment.candidate_ready" class="primary" @click="confirmFirstFace">
-            确认并保存第 1 张
-          </button>
-          <button v-if="session.id" @click="stopSession">停止</button>
+          <template v-if="sourceMode === 'rtsp'">
+            <button v-if="!session.id" class="primary" :disabled="!configuration.configured || (mode === 'enroll' && !enrollReady)" @click="startSession">
+              {{ mode === 'enroll' ? '开始录入' : '开始识别' }}
+            </button>
+            <button v-if="session.id && mode === 'enroll' && enrollment.candidate_ready" class="primary" @click="confirmFirstFace">
+              确认并保存第 1 张
+            </button>
+            <button v-if="session.id" @click="stopSession">停止</button>
+          </template>
+          <template v-else>
+            <button v-if="!camera.running" class="primary" :disabled="camera.starting" @click="openCamera()">
+              {{ camera.starting ? '正在打开…' : '开始识别' }}
+            </button>
+            <button v-else @click="stopCamera">停止</button>
+          </template>
         </div>
       </header>
-      <div class="mode-row">
+      <div v-if="sourceMode === 'rtsp'" class="mode-row">
         <label><input v-model="mode" type="radio" value="recognize" /> 实时识别</label>
         <label><input v-model="mode" type="radio" value="enroll" :disabled="Boolean(session.id)" /> 员工人脸录入</label>
         <select v-if="mode === 'enroll'" v-model="employeeId" :disabled="Boolean(session.id)" aria-label="选择员工">
@@ -269,16 +440,23 @@ onUnmounted(() => {
           <option v-for="item in employees" :key="item.id" :value="item.id">{{ item.name }}（{{ item.employee_no }}）</option>
         </select>
       </div>
+      <p v-if="sourceMode === 'camera' && camera.error" class="camera-error">{{ camera.error }}</p>
       <div class="viewer-body">
         <div class="stage">
-          <img v-if="frameUrl" :src="frameUrl" alt="实时画面" @load="onFrameLoad" />
+          <video
+            v-if="sourceMode === 'camera' && camera.running"
+            ref="cameraVideo"
+            playsinline
+            muted
+          ></video>
+          <img v-else-if="frameUrl" :src="frameUrl" alt="实时画面" @load="onFrameLoad" />
           <div v-else class="placeholder muted">
-            {{ session.id ? '等待画面…' : '配置视频源后点击开始。' }}
+            {{ sourceMode === 'camera' ? '点击“开始识别”打开摄像头。' : (session.id ? '等待画面…' : '配置视频源后点击开始。') }}
           </div>
           <canvas id="live-canvas"></canvas>
         </div>
         <aside class="faces">
-          <template v-if="mode === 'enroll'">
+          <template v-if="sourceMode === 'rtsp' && mode === 'enroll'">
             <div class="enroll-progress">
               <strong>已保存 {{ enrollment.saved_count }} / {{ enrollment.target_samples }} 张</strong>
               <div class="progress-track">
@@ -326,6 +504,7 @@ onUnmounted(() => {
 .config-row {
   display: flex;
   gap: 8px;
+  margin-top: 10px;
 }
 
 .config-row input {
@@ -336,7 +515,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 18px;
-  margin-top: 12px;
+  margin-top: 8px;
   font-size: 14px;
 }
 
@@ -347,27 +526,13 @@ onUnmounted(() => {
   color: var(--muted);
 }
 
-.enroll-progress strong {
-  display: block;
-  margin-bottom: 8px;
-}
-
-.progress-track {
-  height: 8px;
-  border-radius: 4px;
-  background: var(--bg);
-  overflow: hidden;
-  margin-bottom: 10px;
-}
-
-.progress-bar {
-  height: 100%;
-  background: var(--primary);
-  transition: width 0.3s ease;
-}
-
-.small {
-  font-size: 12px;
+.camera-error {
+  margin: 10px 0 0;
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
 }
 
 .viewer-header {
@@ -424,7 +589,8 @@ onUnmounted(() => {
   aspect-ratio: 16 / 9;
 }
 
-.stage img {
+.stage img,
+.stage video {
   width: 100%;
   height: 100%;
   object-fit: contain;
@@ -491,6 +657,29 @@ onUnmounted(() => {
 .faces .score {
   font-variant-numeric: tabular-nums;
   color: var(--muted);
+}
+
+.enroll-progress strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.progress-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s ease;
+}
+
+.small {
+  font-size: 12px;
 }
 
 @media (max-width: 900px) {
