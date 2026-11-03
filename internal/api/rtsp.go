@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
@@ -20,16 +21,37 @@ type rtspAPI struct {
 	manager *rtsp.Manager
 	faces   *facesAPI
 	logger  *slog.Logger
+
+	enrollmentMu    sync.Mutex
+	enrollmentCtrls map[string]*enrollmentController
 }
 
 func registerRTSPRoutes(mux *http.ServeMux, manager *rtsp.Manager, faces *facesAPI) {
-	api := &rtspAPI{manager: manager, faces: faces, logger: faces.logger}
+	api := &rtspAPI{
+		manager:         manager,
+		faces:           faces,
+		logger:          faces.logger,
+		enrollmentCtrls: map[string]*enrollmentController{},
+	}
 	mux.HandleFunc("GET /api/v1/rtsp/configuration", api.getConfiguration)
 	mux.HandleFunc("PUT /api/v1/rtsp/configuration", api.updateConfiguration)
 	mux.HandleFunc("POST /api/v1/rtsp/sessions", api.createSession)
 	mux.HandleFunc("GET /api/v1/rtsp/sessions/{id}", api.sessionSnapshot)
 	mux.HandleFunc("GET /api/v1/rtsp/sessions/{id}/events", api.sessionEvents)
+	mux.HandleFunc("POST /api/v1/rtsp/sessions/{id}/confirm", api.confirmEnrollment)
 	mux.HandleFunc("DELETE /api/v1/rtsp/sessions/{id}", api.stopSession)
+}
+
+func (api *rtspAPI) enrollment(sessionID string) *enrollmentController {
+	api.enrollmentMu.Lock()
+	defer api.enrollmentMu.Unlock()
+	return api.enrollmentCtrls[sessionID]
+}
+
+func (api *rtspAPI) dropEnrollment(sessionID string) {
+	api.enrollmentMu.Lock()
+	delete(api.enrollmentCtrls, sessionID)
+	api.enrollmentMu.Unlock()
 }
 
 type rtspConfigurationPayload struct {
@@ -73,17 +95,45 @@ func (api *rtspAPI) updateConfiguration(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, rtspConfigurationPayload{URL: body.URL, Transport: transport})
 }
 
+type sessionCreatePayload struct {
+	// Mode is "recognize" (default) or "enroll".
+	Mode string `json:"mode"`
+	// EmployeeID is required for enroll mode.
+	EmployeeID int64 `json:"employee_id"`
+}
+
 func (api *rtspAPI) createSession(w http.ResponseWriter, r *http.Request) {
 	if api.faces.engine == nil {
 		writeError(w, http.StatusServiceUnavailable, engineUnavailableDetail)
 		return
 	}
-	session, err := api.manager.Create(r.Context(), rtsp.SessionOptions{
-		Logger: api.faces.logger,
-		Analyzer: func(ctx context.Context, img *engine.Image) (any, error) {
+	var body sessionCreatePayload
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "请求体必须是 JSON 对象")
+			return
+		}
+	}
+
+	options := rtsp.SessionOptions{
+		Logger:   api.faces.logger,
+		Analyzer: func(ctx context.Context, img *engine.Image, _ []byte) (any, error) {
 			return api.faces.analyze(ctx, img)
 		},
-	})
+	}
+	if body.Mode == "enroll" {
+		if body.EmployeeID <= 0 {
+			writeError(w, http.StatusUnprocessableEntity, "录入模式需要 employee_id")
+			return
+		}
+		if _, err := api.faces.store.GetEmployee(r.Context(), body.EmployeeID); err != nil {
+			api.faces.writeStoreError(w, err, "employee not found")
+			return
+		}
+		options.Analyzer = nil // installed after creation below
+	}
+
+	session, err := api.manager.Create(r.Context(), options)
 	if err != nil {
 		switch {
 		case errors.Is(err, rtsp.ErrSourceNotConfigured):
@@ -95,7 +145,45 @@ func (api *rtspAPI) createSession(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	if body.Mode == "enroll" {
+		sessionID := session.ID()
+		controller := newEnrollmentController(api.faces, body.EmployeeID, func() {
+			api.dropEnrollment(sessionID)
+			_ = api.manager.Stop(sessionID)
+		})
+		api.enrollmentMu.Lock()
+		api.enrollmentCtrls[sessionID] = controller
+		api.enrollmentMu.Unlock()
+		session.SetAnalyzer(func(ctx context.Context, img *engine.Image, frameJPEG []byte) (any, error) {
+			return controller.analyze(ctx, img, frameJPEG)
+		})
+	}
 	writeJSON(w, http.StatusCreated, session.Snapshot())
+}
+
+// confirmEnrollment stores the pending first face of an enrollment session.
+func (api *rtspAPI) confirmEnrollment(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	if _, err := api.manager.Get(sessionID); err != nil {
+		writeError(w, http.StatusNotFound, "RTSP 会话不存在")
+		return
+	}
+	controller := api.enrollment(sessionID)
+	if controller == nil {
+		writeError(w, http.StatusConflict, "该会话不是录入会话")
+		return
+	}
+	snapshot, err := controller.confirm(r.Context())
+	if errors.Is(err, ErrNoCandidate) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (api *rtspAPI) sessionSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +192,11 @@ func (api *rtspAPI) sessionSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "RTSP 会话不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, session.Snapshot())
+	snapshot := session.Snapshot()
+	if controller := api.enrollment(session.ID()); controller != nil {
+		snapshot.Enrollment = controller.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (api *rtspAPI) stopSession(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +204,7 @@ func (api *rtspAPI) stopSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "RTSP 会话不存在")
 		return
 	}
+	api.dropEnrollment(r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -137,9 +230,15 @@ func (api *rtspAPI) sessionEvents(w http.ResponseWriter, r *http.Request) {
 	defer detach()
 
 	// initial state so a reconnecting client renders immediately
-	writeSSE(w, flusher, "state", map[string]any{
-		"type": "state", "status": session.Snapshot().Status, "detail": session.Snapshot().Detail,
-	})
+	initial := map[string]any{
+		"type":   "state",
+		"status": string(session.Snapshot().Status),
+		"detail": session.Snapshot().Detail,
+	}
+	if controller := api.enrollment(session.ID()); controller != nil {
+		initial["enrollment"] = controller.Snapshot()
+	}
+	writeSSE(w, flusher, "state", initial)
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -164,6 +263,9 @@ func (api *rtspAPI) sessionEvents(w http.ResponseWriter, r *http.Request) {
 					"status": string(event.Status),
 					"detail": event.Detail,
 				}
+				if controller := api.enrollment(session.ID()); controller != nil {
+					payload["enrollment"] = controller.Snapshot()
+				}
 			case "frame":
 				payload = map[string]any{
 					"type":  "frame",
@@ -176,6 +278,7 @@ func (api *rtspAPI) sessionEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			writeSSE(w, flusher, "message", payload)
 			if event.Kind == "state" && isTerminal(event.Status) {
+				api.dropEnrollment(session.ID())
 				return
 			}
 		}

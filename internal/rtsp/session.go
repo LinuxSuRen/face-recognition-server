@@ -27,9 +27,10 @@ const (
 	StatusStopped       Status = "stopped"
 )
 
-// Analyzer processes one decoded frame; the returned value is passed to
-// subscribers untouched (the API layer defines the JSON shape).
-type Analyzer func(ctx context.Context, img *engine.Image) (any, error)
+// Analyzer processes one decoded frame together with the original JPEG
+// bytes; the returned value is passed to subscribers untouched (the API
+// layer defines the JSON shape).
+type Analyzer func(ctx context.Context, img *engine.Image, frameJPEG []byte) (any, error)
 
 // Event is one SSE-worthy occurrence of a session.
 type Event struct {
@@ -111,12 +112,14 @@ func (s *Session) ID() string { return s.id }
 
 // Snapshot is a consistent view for API responses.
 type Snapshot struct {
-	ID          string `json:"session_id"`
-	Status      Status `json:"status"`
-	Detail      string `json:"detail"`
-	Seq         uint64 `json:"seq"`
-	StartedAt   string `json:"started_at"`
-	LastEventAt string `json:"last_event_at"`
+	ID          string         `json:"session_id"`
+	Status      Status         `json:"status"`
+	Detail      string         `json:"detail"`
+	Seq         uint64         `json:"seq"`
+	StartedAt   string         `json:"started_at"`
+	LastEventAt string         `json:"last_event_at"`
+	// Enrollment carries the enrollment controller state when present.
+	Enrollment map[string]any `json:"enrollment,omitempty"`
 }
 
 // Snapshot returns the current state.
@@ -166,6 +169,21 @@ func (s *Session) broadcast(event Event) {
 			// slow consumer: drop events, the next snapshot will resync it
 		}
 	}
+}
+
+// SetAnalyzer swaps the analysis callback (enrollment sessions install
+// their controller after creation).
+func (s *Session) SetAnalyzer(analyzer Analyzer) {
+	s.mu.Lock()
+	s.opts.Analyzer = analyzer
+	s.mu.Unlock()
+}
+
+// analyzer returns the current callback under lock.
+func (s *Session) analyzer() Analyzer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.opts.Analyzer
 }
 
 // start runs the reader and analysis loops until Stop/expire.
@@ -257,11 +275,11 @@ func (s *Session) analysisLoop(ctx context.Context) {
 
 		var analysis any
 		var err error
-		if s.opts.Analyzer != nil {
+		if analyzer := s.analyzer(); analyzer != nil {
 			var img *engine.Image
 			img, err = engine.DecodeImage(frame)
 			if err == nil {
-				analysis, err = s.opts.Analyzer(ctx, img)
+				analysis, err = analyzer(ctx, img, frame)
 			}
 		}
 		s.mu.Lock()

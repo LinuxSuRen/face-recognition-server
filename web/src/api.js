@@ -69,10 +69,13 @@ export const rtspApi = {
   updateConfiguration(body) {
     return request('/api/v1/rtsp/configuration', {method: 'PUT', body: JSON.stringify(body)})
   },
-  createSession() {
-    return request('/api/v1/rtsp/sessions', {method: 'POST'})
+  createSession(body) {
+    return request('/api/v1/rtsp/sessions', {method: 'POST', body: body ? JSON.stringify(body) : undefined})
   },
   stopSession(sessionId) {
     return request(`/api/v1/rtsp/sessions/${sessionId}`, {method: 'DELETE'})
+  },
+  confirmEnrollment(sessionId) {
+    return request(`/api/v1/rtsp/sessions/${sessionId}/confirm`, {method: 'POST'})
   },
 }

@@ -1,6 +1,6 @@
 <script setup>
-import {onMounted, onUnmounted, reactive, ref} from 'vue'
-import {rtspApi} from '../api'
+import {computed, onMounted, onUnmounted, reactive, ref, watch} from 'vue'
+import {facesApi, rtspApi} from '../api'
 import {faceReasonText, formatScore, friendlyError} from '../errors'
 
 const configuration = reactive({url: '', transport: 'tcp', configured: false, loaded: false})
@@ -8,9 +8,15 @@ const session = reactive({id: null, status: 'idle', detail: ''})
 const faces = ref([])
 const summary = ref(null)
 const frameUrl = ref('')
-const frameSize = reactive({width: 0, height: 0})
 const notice = ref('')
 let source = null
+
+const mode = ref('recognize')
+const employees = ref([])
+const employeeId = ref(null)
+const enrollment = reactive({state: '', saved_count: 0, target_samples: 5, candidate_ready: false, hint: ''})
+
+const enrollReady = computed(() => mode.value === 'enroll' && employeeId.value)
 
 function setNotice(text) {
   notice.value = text
@@ -28,6 +34,24 @@ async function loadConfiguration() {
     setNotice(friendlyError(error))
   }
 }
+
+async function loadEmployees() {
+  try {
+    const data = await facesApi.listEmployees({page: 1, page_size: 100, include_disabled: false})
+    employees.value = data.data || []
+    if (employees.value.length && !employeeId.value) {
+      employeeId.value = employees.value[0].id
+    }
+  } catch (error) {
+    setNotice(friendlyError(error))
+  }
+}
+
+watch(mode, (value) => {
+  if (value === 'enroll' && !employees.value.length) {
+    loadEmployees()
+  }
+})
 
 async function saveConfiguration() {
   try {
@@ -51,13 +75,21 @@ async function startSession() {
     setNotice('请先填写并保存 RTSP 地址')
     return
   }
+  if (mode.value === 'enroll' && !employeeId.value) {
+    setNotice('请选择要录入的员工')
+    return
+  }
   try {
-    const created = await rtspApi.createSession()
+    const body = mode.value === 'enroll' ? {mode: 'enroll', employee_id: employeeId.value} : {}
+    const created = await rtspApi.createSession(body)
     session.id = created.session_id
     session.status = created.status || 'connecting'
     session.detail = created.detail || ''
     faces.value = []
     summary.value = null
+    if (mode.value === 'enroll') {
+      Object.assign(enrollment, {state: 'waiting_for_face', saved_count: 0, target_samples: 5, candidate_ready: false, hint: ''})
+    }
     openStream()
   } catch (error) {
     setNotice(friendlyError(error))
@@ -72,15 +104,35 @@ function openStream() {
     if (data.type === 'state') {
       session.status = data.status
       session.detail = data.detail || ''
+      if (data.enrollment) {
+        Object.assign(enrollment, data.enrollment)
+      }
       return
     }
     if (data.type !== 'frame') return
     frameUrl.value = data.image
     faces.value = data.faces || []
     summary.value = data.summary || null
+    if (data.enrollment) {
+      Object.assign(enrollment, data.enrollment)
+    }
   })
   source.onerror = () => {
     // EventSource auto-reconnects; terminal states surface via state events
+  }
+}
+
+let confirming = false
+async function confirmFirstFace() {
+  if (!session.id || confirming) return
+  confirming = true
+  try {
+    const snapshot = await rtspApi.confirmEnrollment(session.id)
+    Object.assign(enrollment, snapshot)
+  } catch (error) {
+    setNotice(friendlyError(error))
+  } finally {
+    confirming = false
   }
 }
 
@@ -113,8 +165,6 @@ function statusText(status) {
 
 function onFrameLoad(event) {
   const image = event.target
-  frameSize.width = image.naturalWidth
-  frameSize.height = image.naturalHeight
   const canvas = document.getElementById('live-canvas')
   if (!canvas) return
   canvas.width = image.naturalWidth
@@ -125,14 +175,18 @@ function onFrameLoad(event) {
 function drawOverlay(canvas) {
   const context = canvas.getContext('2d')
   context.clearRect(0, 0, canvas.width, canvas.height)
+  const enroll = mode.value === 'enroll'
   for (const face of faces.value) {
     const [x1, y1, x2, y2] = face.bbox_xyxy || []
     if ([x1, y1, x2, y2].some((value) => typeof value !== 'number')) continue
     const known = face.recognition_status === 'known'
-    const color = known ? '#38bdf8' : face.recognition_status === 'unusable' ? '#64748b' : '#f87171'
+    const color = enroll
+      ? '#38bdf8'
+      : known ? '#38bdf8' : face.recognition_status === 'unusable' ? '#64748b' : '#f87171'
     context.strokeStyle = color
     context.lineWidth = Math.max(2, Math.round(canvas.width / 400))
     context.strokeRect(x1, y1, x2 - x1, y2 - y1)
+    if (enroll) continue
     const label = known
       ? `${face.name} ${formatScore(face.similarity)}`
       : face.recognition_status === 'unusable'
@@ -198,34 +252,57 @@ onUnmounted(() => {
           <span>{{ statusText(session.status) }}<template v-if="session.detail"> · {{ session.detail }}</template></span>
         </div>
         <div class="viewer-actions">
-          <button v-if="!session.id" class="primary" :disabled="!configuration.configured" @click="startSession">
-            开始识别
+          <button v-if="!session.id" class="primary" :disabled="!configuration.configured || (mode === 'enroll' && !enrollReady)" @click="startSession">
+            {{ mode === 'enroll' ? '开始录入' : '开始识别' }}
           </button>
-          <button v-else @click="stopSession">停止</button>
+          <button v-if="session.id && mode === 'enroll' && enrollment.candidate_ready" class="primary" @click="confirmFirstFace">
+            确认并保存第 1 张
+          </button>
+          <button v-if="session.id" @click="stopSession">停止</button>
         </div>
       </header>
+      <div class="mode-row">
+        <label><input v-model="mode" type="radio" value="recognize" /> 实时识别</label>
+        <label><input v-model="mode" type="radio" value="enroll" :disabled="Boolean(session.id)" /> 员工人脸录入</label>
+        <select v-if="mode === 'enroll'" v-model="employeeId" :disabled="Boolean(session.id)" aria-label="选择员工">
+          <option v-if="!employees.length" :value="null">暂无启用员工，请先到“人员与人脸”页新增</option>
+          <option v-for="item in employees" :key="item.id" :value="item.id">{{ item.name }}（{{ item.employee_no }}）</option>
+        </select>
+      </div>
       <div class="viewer-body">
         <div class="stage">
           <img v-if="frameUrl" :src="frameUrl" alt="实时画面" @load="onFrameLoad" />
           <div v-else class="placeholder muted">
-            {{ session.id ? '等待画面…' : '配置视频源后点击“开始识别”。' }}
+            {{ session.id ? '等待画面…' : '配置视频源后点击开始。' }}
           </div>
           <canvas id="live-canvas"></canvas>
         </div>
         <aside class="faces">
-          <p class="muted" v-if="summary">
-            共 {{ summary.count }} 张 · 员工 {{ summary.known }} · 陌生人 {{ summary.unknown }}
-          </p>
-          <ul>
-            <li v-for="(face, index) in faces" :key="index" :class="statusClass(face)">
-              <span class="dot"></span>
-              <div class="copy">
-                <strong>{{ statusTitle(face) }}</strong>
-                <small>{{ faceReasonText(face) }}</small>
+          <template v-if="mode === 'enroll'">
+            <div class="enroll-progress">
+              <strong>已保存 {{ enrollment.saved_count }} / {{ enrollment.target_samples }} 张</strong>
+              <div class="progress-track">
+                <div class="progress-bar" :style="{width: `${(enrollment.saved_count / enrollment.target_samples) * 100}%`}"></div>
               </div>
-              <span class="score">{{ face.recognition_status === 'unusable' ? '—' : formatScore(face.similarity) }}</span>
-            </li>
-          </ul>
+              <p class="muted">{{ enrollment.hint || '等待合格人脸…' }}</p>
+              <p class="muted small">录入的第 1 张需人工确认；后续自动采集，间隔至少 2 秒，过于相似的画面会跳过。</p>
+            </div>
+          </template>
+          <template v-else>
+            <p class="muted" v-if="summary">
+              共 {{ summary.count }} 张 · 员工 {{ summary.known }} · 陌生人 {{ summary.unknown }}
+            </p>
+            <ul>
+              <li v-for="(face, index) in faces" :key="index" :class="statusClass(face)">
+                <span class="dot"></span>
+                <div class="copy">
+                  <strong>{{ statusTitle(face) }}</strong>
+                  <small>{{ faceReasonText(face) }}</small>
+                </div>
+                <span class="score">{{ face.recognition_status === 'unusable' ? '—' : formatScore(face.similarity) }}</span>
+              </li>
+            </ul>
+          </template>
         </aside>
       </div>
     </section>
@@ -253,6 +330,44 @@ onUnmounted(() => {
 
 .config-row input {
   flex: 1;
+}
+
+.mode-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+.mode-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.enroll-progress strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.progress-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s ease;
+}
+
+.small {
+  font-size: 12px;
 }
 
 .viewer-header {
