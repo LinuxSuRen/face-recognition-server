@@ -147,19 +147,25 @@ func waitHealthy(t *testing.T, process *serverProcess) {
 	for time.Now().Before(deadline) {
 		response, err := http.Get(process.baseURL + "/healthz")
 		if err == nil {
+			raw, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
 			var payload struct {
 				Status string `json:"status"`
 				Engine struct {
-					Ready bool `json:"ready"`
+					Ready  bool   `json:"ready"`
+					Reason string `json:"reason"`
 				} `json:"engine"`
 			}
-			err = json.NewDecoder(response.Body).Decode(&payload)
-			response.Body.Close()
+			err = json.Unmarshal(raw, &payload)
 			if err == nil && payload.Engine.Ready {
 				return
 			}
 			if err == nil && payload.Status != "" && !payload.Engine.Ready {
-				t.Fatalf("engine not ready; check models and onnxruntime:\n%s", process.stderr.String())
+				t.Fatalf("engine not ready (healthz: %s):\nserver stderr:\n%s",
+					string(raw), process.stderr.String())
+			}
+			if readErr != nil {
+				t.Fatalf("reading healthz: %v", readErr)
 			}
 		}
 		time.Sleep(300 * time.Millisecond)

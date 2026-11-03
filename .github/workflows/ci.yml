@@ -67,7 +67,7 @@ jobs:
         env:
           CGO_ENABLED: '1'
           CC: clang
-          FACE_RECOGNITION_ORT_LIB: ${{ github.workspace }}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so
+          FACE_RECOGNITION_ORT_LIB: ${{ github.workspace }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}/lib/libonnxruntime.so
         run: |
           ./scripts/download-models.sh models
           go test -tags integration ./internal/engine/... -count=1 -v
@@ -90,7 +90,7 @@ jobs:
           CGO_ENABLED: '1'
           CC: clang
           FACE_RECOGNITION_MODELS: ${{ github.workspace }}/models
-          FACE_RECOGNITION_ORT_LIB: ${{ github.workspace }}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so
+          FACE_RECOGNITION_ORT_LIB: ${{ github.workspace }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}/lib/libonnxruntime.so
           FRS_REPO_ROOT: ${{ github.workspace }}
         run: |
           ./scripts/download-models.sh models
