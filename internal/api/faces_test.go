@@ -288,6 +288,10 @@ func TestDegradedModeReportsUnavailable(t *testing.T) {
 	if payload["status"] != "degraded" {
 		t.Fatalf("healthz must report degraded: %+v", payload)
 	}
+	engine := payload["engine"].(map[string]any)
+	if engine["reason"] != "no_cgo_build" {
+		t.Fatalf("missing engine must carry a reason code: %+v", engine)
+	}
 }
 
 func TestUploadValidation(t *testing.T) {

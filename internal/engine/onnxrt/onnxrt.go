@@ -70,6 +70,19 @@ type ortEngine struct {
 // New builds the engine from the YuNet and SFace ONNX files. Options arrive
 // already defaulted from engine.New.
 func New(opts engine.Options) (engine.Engine, error) {
+	// fail with classified errors before touching onnxruntime so callers
+	// can tell missing models from library problems
+	for _, path := range []struct {
+		file  string
+		label string
+	}{
+		{opts.DetectorPath, "YuNet detector model"},
+		{opts.RecognizerPath, "SFace recognizer model"},
+	} {
+		if info, err := os.Stat(path.file); err != nil || info.IsDir() {
+			return nil, fmt.Errorf("%s not found at %s: %w", path.label, path.file, os.ErrNotExist)
+		}
+	}
 	if err := initializeEnvironment(); err != nil {
 		return nil, err
 	}

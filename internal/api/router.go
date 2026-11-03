@@ -23,6 +23,10 @@ type Deps struct {
 	Logger *slog.Logger
 	Store  *store.Store
 	Engine engine.Engine
+	// EngineError is the classified reason the engine is unavailable:
+	// no_cgo_build, models_missing, ort_library_failed or
+	// engine_start_failed. Empty means "not attempted / unknown".
+	EngineError string
 	// RTSP is optional; a fresh manager is created when nil.
 	RTSP *rtsp.Manager
 }
@@ -66,6 +70,11 @@ func healthz(deps Deps) http.HandlerFunc {
 			engineState["model_version"] = deps.Engine.ModelVersion()
 		} else {
 			status = "degraded"
+			reason := deps.EngineError
+			if reason == "" {
+				reason = "no_cgo_build"
+			}
+			engineState["reason"] = reason
 		}
 		dbState := map[string]any{"ok": deps.Store != nil}
 		if deps.Store == nil {

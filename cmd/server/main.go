@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,9 +43,12 @@ func main() {
 		DetectorPath:   filepath.Join(cfg.ModelsDir, "face_detection_yunet.onnx"),
 		RecognizerPath: filepath.Join(cfg.ModelsDir, "face_recognition_sface.onnx"),
 	})
+	engineReason := ""
 	if err != nil {
 		// Degraded mode: the UI and profile management stay available.
-		logger.Warn("[server] inference engine unavailable", "error", err)
+		engineReason = classifyEngineError(err)
+		logger.Warn("[server] inference engine unavailable",
+			"reason", engineReason, "error", err)
 	} else {
 		defer faceEngine.Close()
 		logger.Info("[server] inference engine ready",
@@ -57,11 +61,12 @@ func main() {
 	server := &http.Server{
 		Addr: cfg.Addr,
 		Handler: api.NewRouter(api.Deps{
-			Config: cfg,
-			Logger: logger,
-			Store:  faceStore,
-			Engine: faceEngine,
-			RTSP:   rtspManager,
+			Config:      cfg,
+			Logger:      logger,
+			Store:       faceStore,
+			Engine:      faceEngine,
+			EngineError: engineReason,
+			RTSP:        rtspManager,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -97,6 +102,23 @@ func main() {
 		logger.Error("[server] graceful shutdown failed", "error", err)
 	}
 	logger.Info("[server] stopped")
+}
+
+// classifyEngineError maps an engine startup failure to the stable reason
+// codes surfaced on /healthz and in the UI.
+func classifyEngineError(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, engine.ErrEngineUnavailable):
+		return "no_cgo_build"
+	case errors.Is(err, os.ErrNotExist):
+		return "models_missing"
+	case strings.Contains(err.Error(), "initializing onnxruntime"):
+		return "ort_library_failed"
+	default:
+		return "engine_start_failed"
+	}
 }
 
 // listenWithDrift binds addr. When exactly its port is already in use the

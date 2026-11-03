@@ -36,6 +36,21 @@ export function faceReasonText(face) {
   return ''
 }
 
+// Engine unavailability copy keyed by the stable /healthz reason codes.
+const engineReasonCopies = {
+  no_cgo_build:
+    '识别引擎未加载：当前构建不包含推理引擎（缺少 CGO）。人员与人脸管理仍可用；如需识别，请使用官方容器镜像或按 README 构建完整版。',
+  models_missing:
+    '识别引擎未加载：模型文件缺失。请在服务端运行 scripts/download-models 下载 YuNet 与 SFace 模型后重启服务。',
+  ort_library_failed:
+    '识别引擎未加载：onnxruntime 动态库加载失败。请检查 FACE_RECOGNITION_ORT_LIB 指向的共享库，版本需与 onnxruntime_go 的要求一致。',
+  engine_start_failed: '识别引擎启动失败，详情请查看服务启动日志。',
+}
+
+export function engineReasonText(reason) {
+  return engineReasonCopies[reason] || engineReasonCopies.engine_start_failed
+}
+
 export function formatScore(value) {
   if (value === null || value === undefined) return '—'
   return `${Math.round(value * 100)}%`
