@@ -157,6 +157,18 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     last_used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE TABLE IF NOT EXISTS user_faces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    embedding BLOB NOT NULL,
+    embedding_dim INTEGER NOT NULL,
+    image BLOB,
+    image_mime_type TEXT,
+    model_version TEXT NOT NULL,
+    quality_score REAL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_faces_user_id ON user_faces(user_id);
 `)
 	if err != nil {
 		return fmt.Errorf("migrating database: %w", err)

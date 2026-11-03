@@ -41,10 +41,12 @@ images are stored with their 128-d normalized embeddings.
 - **External recognition API** with bearer tokens (scopes `verify`,
   `identify`, `enroll`) so other systems can add face login on top of this
   platform.
-- **Platform login**: local accounts (bcrypt) plus OIDC federated login
-  (authorization code + PKCE; works with any compliant issuer such as
-  [home-gate](https://github.com/LinuxSuRen/home-gate)). Management
-  endpoints require a session; users and tokens are managed by admins.
+- **Platform login**: local accounts (bcrypt) plus **face login** — bind
+  your face under 我的人脸 and sign in from the login page's camera — and
+  OIDC federated login (authorization code + PKCE; works with any compliant
+  issuer such as [home-gate](https://github.com/LinuxSuRen/home-gate)).
+  Management endpoints require a session; users and tokens are managed by
+  admins.
 
 ## External API (face login for other systems)
 
@@ -132,9 +134,11 @@ All list endpoints share the pagination contract
 | --- | --- | --- |
 | GET | `/healthz` | status, engine and database readiness |
 | POST | `/api/v1/auth/login` | username/password → session cookie |
+| POST | `/api/v1/auth/face-login` | face photo → session cookie (face login) |
 | POST | `/api/v1/auth/logout` | drop the session |
 | GET | `/api/v1/auth/session` | current user, auth/SSO state |
 | GET | `/api/v1/auth/oauth/{start,callback}` | OIDC authorization-code + PKCE flow |
+| GET / POST / DELETE | `/api/v1/me/faces` | manage my bound login faces |
 | POST / GET | `/api/v1/users` | create / page platform users (admin) |
 | PATCH | `/api/v1/users/{id}` | rename, reset password, toggle, role (admin) |
 | POST / GET | `/api/v1/tokens` | issue (scope-picked) / list API tokens (admin) |

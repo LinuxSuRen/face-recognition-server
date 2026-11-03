@@ -16,6 +16,7 @@ import (
 
 	"github.com/LinuxSuRen/face-recognition-server/internal/auth"
 	"github.com/LinuxSuRen/face-recognition-server/internal/config"
+	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
 	"github.com/LinuxSuRen/face-recognition-server/internal/store"
 )
 
@@ -26,7 +27,7 @@ type authHarness struct {
 	cookie  string
 }
 
-func newAuthHarness(t *testing.T) *authHarness {
+func newAuthHarness(t *testing.T, engines ...engine.Engine) *authHarness {
 	t.Helper()
 	faceStore, err := store.Open(filepath.Join(t.TempDir(), "auth.sqlite3"))
 	if err != nil {
@@ -37,13 +38,63 @@ func newAuthHarness(t *testing.T) *authHarness {
 	if _, err := faceStore.CreateUser(t.Context(), "admin", "管理员", hash, auth.AdminRole, true); err != nil {
 		t.Fatalf("creating admin: %v", err)
 	}
-	handler := NewRouter(Deps{
+	deps := Deps{
 		Config:      config.Load(),
 		Logger:      slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		Store:       faceStore,
 		AuthEnabled: true,
-	})
-	return &authHarness{handler: handler, store: faceStore}
+	}
+	if len(engines) > 0 {
+		deps.Engine = engines[0]
+	}
+	return &authHarness{handler: NewRouter(deps), store: faceStore}
+}
+
+// TestFaceLoginFlow binds a face to the admin account and logs in with it.
+func TestFaceLoginFlow(t *testing.T) {
+	fake := &fakeEngine{faces: []engine.ExtractedFace{goodFace()}}
+	h := newAuthHarness(t, fake)
+	h.login(t, "admin", "admin-pw")
+
+	// bind my face (session required)
+	request := multipartRequest("/api/v1/me/faces", "image", tinyPNG(t), nil)
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: h.cookie})
+	recorder := httptest.NewRecorder()
+	h.handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("face bind status = %d body %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "Embedding") {
+		t.Fatalf("raw embedding must not leak in JSON: %s", recorder.Body.String())
+	}
+
+	// face login without a session
+	h.cookie = ""
+	request = multipartRequest("/api/v1/auth/face-login", "image", tinyPNG(t), nil)
+	recorder = httptest.NewRecorder()
+	h.handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("face login status = %d body %s", recorder.Code, recorder.Body.String())
+	}
+	hasCookie := false
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == auth.SessionCookie {
+			hasCookie = true
+		}
+	}
+	if !hasCookie {
+		t.Fatalf("face login must set the session cookie")
+	}
+
+	// an account with no bound face cannot face-login
+	other := &fakeEngine{faces: []engine.ExtractedFace{goodFace()}}
+	h2 := newAuthHarness(t, other)
+	attempt := multipartRequest("/api/v1/auth/face-login", "image", tinyPNG(t), nil)
+	reject := httptest.NewRecorder()
+	h2.handler.ServeHTTP(reject, attempt)
+	if reject.Code != http.StatusUnauthorized {
+		t.Fatalf("no face bound must be rejected, got %d", reject.Code)
+	}
 }
 
 func (h *authHarness) login(t *testing.T, username, password string) *httptest.ResponseRecorder {

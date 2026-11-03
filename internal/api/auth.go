@@ -31,8 +31,13 @@ func registerAuthRoutes(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("POST /api/v1/auth/login", api.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", api.logout)
 	mux.HandleFunc("GET /api/v1/auth/session", api.session)
+	mux.HandleFunc("POST /api/v1/auth/face-login", api.faceLogin)
 	mux.HandleFunc("GET /api/v1/auth/oauth/start", api.oauthStart)
 	mux.HandleFunc("GET /api/v1/auth/oauth/callback", api.oauthCallback)
+
+	mux.HandleFunc("GET /api/v1/me/faces", api.listMyFaces)
+	mux.HandleFunc("POST /api/v1/me/faces", api.addMyFace)
+	mux.HandleFunc("DELETE /api/v1/me/faces/{id}", api.deleteMyFace)
 
 	mux.HandleFunc("GET /api/v1/users", api.listUsers)
 	mux.HandleFunc("POST /api/v1/users", api.createUser)
@@ -100,6 +105,129 @@ func (api *authAPI) session(w http.ResponseWriter, r *http.Request) {
 		payload["user"] = user
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+// faceLogin authenticates the platform itself by face: the browser posts a
+// webcam snapshot and the best account match above the threshold gets the
+// session.
+func (api *authAPI) faceLogin(w http.ResponseWriter, r *http.Request) {
+	upload, status, err := readUpload(r, api.deps.Config.MaxImageBytes, "image")
+	if err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
+	if api.deps.Engine == nil {
+		writeError(w, http.StatusServiceUnavailable, engineUnavailableDetail)
+		return
+	}
+	image, err := engine.DecodeImage(upload.Content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	token, user, similarity, err := api.auth.FaceLogin(r.Context(), image,
+		api.deps.Engine, api.deps.Config.KnownThreshold)
+	if err != nil {
+		api.deps.Logger.Info("[auth][face-login] failed", "reason", err.Error())
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     auth.SessionCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(auth.SessionLifetime.Seconds()),
+	})
+	api.deps.Logger.Info("[auth][face-login] success",
+		"username", user.Username, "similarity", math.Round(similarity*10000)/10000)
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
+// ---- my bound faces ----
+
+func (api *authAPI) listMyFaces(w http.ResponseWriter, r *http.Request) {
+	user := api.deps.SessionUser(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
+	faces, err := api.deps.Store.ListUserFaces(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "加载人脸样本失败")
+		return
+	}
+	if faces == nil {
+		faces = []store.UserFace{}
+	}
+	writeJSON(w, http.StatusOK, PageResponse{
+		Data: faces, Page: 1, Total: len(faces), PageSize: MaxPageSize,
+	})
+}
+
+func (api *authAPI) addMyFace(w http.ResponseWriter, r *http.Request) {
+	user := api.deps.SessionUser(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
+	upload, status, err := readUpload(r, api.deps.Config.MaxImageBytes, "image")
+	if err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
+	if api.deps.Engine == nil {
+		writeError(w, http.StatusServiceUnavailable, engineUnavailableDetail)
+		return
+	}
+	image, err := engine.DecodeImage(upload.Content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	faces, err := api.deps.Engine.Extract(image)
+	if err != nil {
+		api.deps.Logger.Error("[auth][my-face] extraction failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "face extraction failed")
+		return
+	}
+	face, err := recognizer.SelectEnrollmentFace(faces)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	created, err := api.deps.Store.AddUserFace(r.Context(), user.ID, store.UserFaceEnrollment{
+		Embedding:     face.Embedding,
+		ModelVersion:  api.deps.Engine.ModelVersion(),
+		QualityScore:  face.Quality.Score,
+		Image:         upload.Content,
+		ImageMimeType: upload.ContentType,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存人脸样本失败")
+		return
+	}
+	api.deps.Logger.Info("[auth][my-face] bound", "username", user.Username,
+		"sample_id", created.ID, "quality", face.Quality.Score)
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (api *authAPI) deleteMyFace(w http.ResponseWriter, r *http.Request) {
+	user := api.deps.SessionUser(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
+	id, ok := parseID(w, r, "id")
+	if !ok {
+		return
+	}
+	if err := api.deps.Store.DeleteUserFace(r.Context(), user.ID, id); err != nil {
+		writeError(w, http.StatusNotFound, "人脸样本不存在")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (api *authAPI) oauthStart(w http.ResponseWriter, r *http.Request) {

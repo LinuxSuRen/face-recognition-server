@@ -74,6 +74,7 @@ watch(() => route.path, () => {
       <router-link to="/faces">人员与人脸</router-link>
       <router-link to="/live">实时识别</router-link>
       <router-link v-if="account.role === 'admin'" to="/admin">系统管理</router-link>
+      <router-link to="/me">我的人脸</router-link>
     </nav>
     <span class="topbar-right">
       <span

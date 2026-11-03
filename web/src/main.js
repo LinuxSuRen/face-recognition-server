@@ -5,6 +5,7 @@ import FacesView from './views/FacesView.vue'
 import LiveView from './views/LiveView.vue'
 import LoginView from './views/LoginView.vue'
 import AdminView from './views/AdminView.vue'
+import MeView from './views/MeView.vue'
 import './style.css'
 
 const router = createRouter({
@@ -15,6 +16,7 @@ const router = createRouter({
     {path: '/live', component: LiveView},
     {path: '/login', component: LoginView},
     {path: '/admin', component: AdminView},
+    {path: '/me', component: MeView},
   ],
 })
 

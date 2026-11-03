@@ -106,3 +106,22 @@ export const adminApi = {
     return request('/api/v1/auth/logout', {method: 'POST'})
   },
 }
+
+export const meApi = {
+  listFaces() {
+    return request('/api/v1/me/faces')
+  },
+  addFace(file) {
+    const form = new FormData()
+    form.append('image', file)
+    return request('/api/v1/me/faces', {method: 'POST', body: form})
+  },
+  deleteFace(id) {
+    return request(`/api/v1/me/faces/${id}`, {method: 'DELETE'})
+  },
+  faceLogin(file) {
+    const form = new FormData()
+    form.append('image', file)
+    return request('/api/v1/auth/face-login', {method: 'POST', body: form})
+  },
+}
