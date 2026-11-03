@@ -27,6 +27,17 @@ type Deps struct {
 	RTSP *rtsp.Manager
 }
 
+// version is reported on /healthz; main overrides it via SetVersion at
+// startup with the value injected at build time.
+var version = "dev"
+
+// SetVersion records the build version for /healthz.
+func SetVersion(value string) {
+	if value != "" {
+		version = value
+	}
+}
+
 // NewRouter builds the complete HTTP mux: /healthz, the versioned API and
 // the embedded Vue UI as the fallback.
 func NewRouter(deps Deps) *http.ServeMux {
@@ -61,9 +72,10 @@ func healthz(deps Deps) http.HandlerFunc {
 			status = "degraded"
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status": status,
-			"engine": engineState,
-			"db":     dbState,
+			"status":  status,
+			"version": version,
+			"engine":  engineState,
+			"db":      dbState,
 		})
 	}
 }

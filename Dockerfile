@@ -9,6 +9,7 @@ RUN pnpm build
 
 FROM golang:1.26-bookworm AS server
 ARG ONNXRUNTIME_VERSION=1.31.0
+ARG VERSION=dev
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends clang curl \
     && curl -fL --retry 4 -o ort.tgz \
@@ -24,7 +25,7 @@ COPY scripts/ scripts/
 COPY --from=web /src/web/dist internal/httpui/dist
 # bake the models so the image works out of the box
 RUN ./scripts/download-models.sh models
-RUN go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+RUN go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/server ./cmd/server
 
 FROM debian:bookworm-slim
 ARG ONNXRUNTIME_VERSION=1.31.0

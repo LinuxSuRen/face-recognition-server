@@ -1,0 +1,146 @@
+name: release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image tag (defaults to dev)'
+        required: false
+        default: dev
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  ONNXRUNTIME_VERSION: "1.31.0"
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      channel: ${{ steps.meta.outputs.channel }}
+    steps:
+      - id: meta
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "channel=release" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/heads/master ]]; then
+            echo "version=master" >> "$GITHUB_OUTPUT"
+            echo "channel=master" >> "$GITHUB_OUTPUT"
+          else
+            version="${{ github.event.inputs.version }}"
+            echo "version=${version:-dev}" >> "$GITHUB_OUTPUT"
+            echo "channel=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+  image:
+    runs-on: ubuntu-latest
+    needs: [resolve]
+    steps:
+      - uses: actions/checkout@v4
+      - id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ needs.resolve.outputs.version }}
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ needs.resolve.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
+
+  binaries:
+    runs-on: ubuntu-latest
+    needs: [resolve]
+    if: needs.resolve.outputs.channel == 'release'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build the web UI into the binary
+        run: |
+          cd web && pnpm install --frozen-lockfile && pnpm build
+          rm -rf ../internal/httpui/dist
+          cp -r dist ../internal/httpui/dist
+      - name: Install toolchain and onnxruntime
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends clang
+          curl -fL --retry 4 -o ort.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf ort.tgz
+      - name: Build release binaries
+        env:
+          CGO_ENABLED: '1'
+          CC: clang
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          mkdir -p out
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+            -o out/face-recognition-server_linux_amd64 ./cmd/server
+          cd out
+          tar -czf face-recognition-server_${VERSION}_linux_amd64.tar.gz \
+            face-recognition-server_linux_amd64
+          sha256sum ./*.tar.gz > sha256sums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: out/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums
+          path: out/sha256sums.txt
+
+  github-release:
+    runs-on: ubuntu-latest
+    needs: [resolve, image, binaries]
+    if: needs.resolve.outputs.channel == 'release'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "face-recognition-server $TAG" \
+            --notes "Version $VERSION.
+
+          **Container image**
+
+              docker pull ghcr.io/${GITHUB_REPOSITORY,,}:${VERSION}
+
+          The image ships the web UI, the ONNX models, onnxruntime and
+          ffmpeg; mount a volume at /app/data to keep the face database.
+
+          **Checksums** are in sha256sums.txt next to the tarballs.
+
+          See the README for configuration and the HTTP API." \
+            assets/*

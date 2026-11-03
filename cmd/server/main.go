@@ -20,6 +20,9 @@ import (
 	"github.com/LinuxSuRen/face-recognition-server/internal/store"
 )
 
+// version is injected at build time (-ldflags "-X main.version=...").
+var version = "dev"
+
 func main() {
 	cfg := config.Load()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -60,6 +63,7 @@ func main() {
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	api.SetVersion(version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

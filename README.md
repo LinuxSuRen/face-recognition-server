@@ -1,5 +1,10 @@
 # face-recognition-server
 
+[![ci](https://github.com/LinuxSuRen/face-recognition-server/actions/workflows/ci.yml/badge.svg)](https://github.com/LinuxSuRen/face-recognition-server/actions/workflows/ci.yml)
+[![release](https://github.com/LinuxSuRen/face-recognition-server/actions/workflows/release.yml/badge.svg)](https://github.com/LinuxSuRen/face-recognition-server/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/LinuxSuRen/face-recognition-server)](https://github.com/LinuxSuRen/face-recognition-server/releases)
+[![container image](https://img.shields.io/badge/image-ghcr.io-2496ed)](https://github.com/LinuxSuRen/face-recognition-server/pkgs/container/face-recognition-server)
+
 Standalone face recognition service written in **Go + Vue 3**, built on
 [ONNX Runtime](https://onnxruntime.ai/) inference of two open models from the
 Apache-2.0 licensed [opencv_zoo](https://github.com/opencv/opencv_zoo):
@@ -42,12 +47,21 @@ make build && ./bin/server
 # open http://localhost:8080
 ```
 
-Docker (models and the ONNX Runtime library are baked into the image):
+Docker (the published image ships the web UI, the ONNX models, onnxruntime
+and ffmpeg; keep the face database on a volume):
 
 ```bash
-docker build -t face-recognition-server .
-docker run -p 8080:8080 -v face-data:/app/data face-recognition-server
+docker run -d --name face-recognition -p 8080:8080 \
+  -v face-data:/app/data ghcr.io/linuxsuren/face-recognition-server:latest
+# or a pinned version
+docker run -d -p 8080:8080 -v face-data:/app/data \
+  ghcr.io/linuxsuren/face-recognition-server:0.0.1
 ```
+
+Releases are cut by pushing a `v*` tag: the
+[release workflow](.github/workflows/release.yml) publishes the multi-arch
+GHCR image, the linux/amd64 binary tarball with checksums and the GitHub
+release in one go.
 
 > The onnxruntime shared library version must match the one expected by
 > [onnxruntime_go](https://github.com/yalue/onnxruntime_go) (1.31.0 at the
@@ -114,7 +128,14 @@ make vet
 make web-install web-build  # Vue 3 + Vite frontend
 make build                  # full binary (CGO + onnxruntime)
 go test -tags integration ./internal/engine/...   # real-model tests
+go test -tags e2e ./internal/e2e/ -v              # boots the real binary:
+                            # employee/sample/recognize over HTTP plus an
+                            # RTSP loop (ffmpeg serves the sample photo)
 ```
+
+CI ([ci.yml](.github/workflows/ci.yml)) runs five lanes: formatting/vet/unit
+tests, the web build, the CGO build with real-model integration tests, the
+end-to-end suite and a no-push Docker image build.
 
 ## License
 
