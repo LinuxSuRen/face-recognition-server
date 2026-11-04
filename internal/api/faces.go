@@ -671,7 +671,11 @@ func roundBox(box [4]float32) [4]float32 {
 }
 
 func clampInt(v, low, high int) int {
-	if v < low { return low }
-	if v > high { return high }
+	if v < low {
+		return low
+	}
+	if v > high {
+		return high
+	}
 	return v
 }
