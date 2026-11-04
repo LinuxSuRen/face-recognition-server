@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/LinuxSuRen/face-recognition-server/internal/auth"
@@ -46,6 +47,8 @@ func registerAuthRoutes(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/tokens", api.listTokens)
 	mux.HandleFunc("POST /api/v1/tokens", api.createToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", api.deleteToken)
+	mux.HandleFunc("GET /api/v1/login-events", api.listLoginEvents)
+	mux.HandleFunc("GET /api/v1/login-events/{id}/image", api.loginEventImage)
 
 	// external face recognition API (bearer tokens, independent of the
 	// browser session auth)
@@ -73,6 +76,8 @@ func (api *authAPI) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, auth.ErrInvalidCredentials.Error())
 		return
 	}
+	_ = api.deps.Store.CreateLoginEvent(r.Context(),
+		user.ID, "password", 0, nil, "", clientIP(r))
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookie,
 		Value:    token,
@@ -140,6 +145,9 @@ func (api *authAPI) faceLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(auth.SessionLifetime.Seconds()),
 	})
+	_ = api.deps.Store.CreateLoginEvent(r.Context(),
+		user.ID, "face", math.Round(similarity*10000)/10000,
+		upload.Content, upload.ContentType, clientIP(r))
 	api.deps.Logger.Info("[auth][face-login] success",
 		"username", user.Username, "similarity", math.Round(similarity*10000)/10000)
 	writeJSON(w, http.StatusOK, map[string]any{"user": user})
@@ -700,6 +708,63 @@ func (api *authAPI) enroll(w http.ResponseWriter, r *http.Request, _ *store.APIT
 		"sample_id":     template.ID,
 		"quality_score": face.Quality.Score,
 	})
+}
+
+// ---- login audit ----
+
+func (api *authAPI) listLoginEvents(w http.ResponseWriter, r *http.Request) {
+	query := parsePageQuery(r)
+	events, total, err := api.deps.Store.ListLoginEvents(r.Context(), query.Page, query.PageSize)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "加载登录记录失败")
+		return
+	}
+	if events == nil {
+		events = []store.LoginEvent{}
+	}
+	for i := range events {
+		if events[i].HasImage {
+			events[i].ImageMimeType = "/api/v1/login-events/" +
+				strconv.FormatInt(events[i].ID, 10) + "/image"
+		} else {
+			events[i].ImageMimeType = ""
+		}
+	}
+	writeJSON(w, http.StatusOK, PageResponse{
+		Data: events, Page: query.Page, Total: total, PageSize: query.PageSize,
+	})
+}
+
+func (api *authAPI) loginEventImage(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r, "id")
+	if !ok {
+		return
+	}
+	image, mimeType, err := api.deps.Store.GetLoginEventImage(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "登录照片不存在")
+		return
+	}
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(image)
+}
+
+// clientIP extracts the best-guess origin address.
+func clientIP(r *http.Request) string {
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		parts := strings.SplitN(forwarded, ",", 2)
+		return strings.TrimSpace(parts[0])
+	}
+	if real := r.Header.Get("X-Real-IP"); real != "" {
+		return real
+	}
+	host := r.RemoteAddr
+	if index := strings.LastIndex(host, ":"); index > 0 {
+		host = host[:index]
+	}
+	return host
 }
 
 func deref(value *string) string {

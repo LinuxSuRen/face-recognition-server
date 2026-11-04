@@ -1,12 +1,14 @@
 <script setup>
 import {onMounted, reactive, ref} from 'vue'
 import {adminApi} from '../api'
-import {friendlyError} from '../errors'
+import {formatScore, friendlyError} from '../errors'
 
 const notice = ref('')
 const users = ref([])
 const userPage = reactive({page: 1, total: 0, pageSize: 20})
 const tokens = ref([])
+const loginEvents = ref([])
+const eventPage = reactive({page: 1, total: 0, pageSize: 10})
 
 const userFormOpen = ref(false)
 const userForm = reactive({username: '', display_name: '', password: '', role: 'user'})
@@ -27,6 +29,22 @@ async function loadUsers() {
   } catch (error) {
     setNotice(friendlyError(error))
   }
+}
+
+async function loadLoginEvents(page = 1) {
+  try {
+    const data = await adminApi.listLoginEvents({page, page_size: eventPage.pageSize})
+    loginEvents.value = data.data || []
+    eventPage.total = data.total || 0
+    eventPage.page = data.page || page
+  } catch (error) {
+    setNotice(friendlyError(error))
+  }
+}
+
+function methodText(method) {
+  const map = {face: '人脸', password: '密码', oidc: 'SSO'}
+  return map[method] || method
 }
 
 async function loadTokens() {
@@ -110,6 +128,7 @@ async function deleteToken(token) {
 onMounted(() => {
   loadUsers()
   loadTokens()
+  loadLoginEvents()
 })
 </script>
 
@@ -186,6 +205,43 @@ onMounted(() => {
           </tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="panel">
+      <header class="row">
+        <h3>登录记录</h3>
+        <span class="muted">人脸登录的照片保留在此，方便回溯审查</span>
+      </header>
+      <table v-if="loginEvents.length">
+        <thead>
+          <tr><th>时间</th><th>用户</th><th>方式</th><th>相似度</th><th>来源 IP</th><th>照片</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="event in loginEvents" :key="event.id">
+            <td>{{ event.created_at }}</td>
+            <td>{{ event.username }}</td>
+            <td>{{ methodText(event.method) }}</td>
+            <td>{{ event.method === 'face' ? formatScore(event.similarity) : '—' }}</td>
+            <td>{{ event.ip || '—' }}</td>
+            <td>
+              <img
+                v-if="event.image_mime_type"
+                :src="event.image_mime_type"
+                alt="登录照片"
+                class="login-photo"
+                loading="lazy"
+              />
+              <span v-else class="muted">—</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">暂无登录记录。</p>
+      <div v-if="eventPage.total > eventPage.pageSize" class="pager">
+        <button :disabled="eventPage.page <= 1" @click="loadLoginEvents(eventPage.page - 1)">上一页</button>
+        <span class="muted">{{ eventPage.page }} / {{ Math.ceil(eventPage.total / eventPage.pageSize) }}</span>
+        <button :disabled="eventPage.page * eventPage.pageSize >= eventPage.total" @click="loadLoginEvents(eventPage.page + 1)">下一页</button>
+      </div>
     </section>
   </div>
 </template>
@@ -281,5 +337,21 @@ button.link.danger {
   padding: 2px 6px;
   word-break: break-all;
   user-select: all;
+}
+
+.login-photo {
+  width: 64px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
 }
 </style>

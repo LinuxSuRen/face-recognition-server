@@ -105,6 +105,9 @@ export const adminApi = {
   logout() {
     return request('/api/v1/auth/logout', {method: 'POST'})
   },
+  listLoginEvents(params) {
+    return request(`/api/v1/login-events${queryString(params)}`)
+  },
 }
 
 export const meApi = {
