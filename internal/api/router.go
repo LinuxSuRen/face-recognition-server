@@ -126,7 +126,9 @@ func isPublicPath(path string) bool {
 
 func isAdminOnlyPath(path string) bool {
 	return strings.HasPrefix(path, "/api/v1/users") ||
-		strings.HasPrefix(path, "/api/v1/tokens")
+		strings.HasPrefix(path, "/api/v1/tokens") ||
+		strings.HasPrefix(path, "/api/v1/settings") ||
+		strings.HasPrefix(path, "/api/v1/login-events")
 }
 
 func healthz(deps Deps) http.HandlerFunc {

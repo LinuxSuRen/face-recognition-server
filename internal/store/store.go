@@ -180,6 +180,11 @@ CREATE TABLE IF NOT EXISTS login_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_login_events_user_id ON login_events(user_id);
+CREATE TABLE IF NOT EXISTS system_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return fmt.Errorf("migrating database: %w", err)

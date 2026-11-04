@@ -8,9 +8,9 @@ const form = reactive({username: '', password: ''})
 const busy = ref(false)
 const error = ref('')
 const hint = ref('')
-const session = reactive({authEnabled: true, oidcConfigured: false})
+const session = reactive({authEnabled: true, oidcConfigured: false, livenessEnabled: false})
 
-const face = reactive({starting: false, running: false, reason: ''})
+const face = reactive({starting: false, running: false, reason: '', livenessFrames: 0})
 const cameraVideo = ref(null)
 let cameraStream = null
 let faceTimer = null
@@ -21,6 +21,7 @@ onMounted(async () => {
     const data = await api.request('/api/v1/auth/session')
     session.authEnabled = data.auth_enabled !== false
     session.oidcConfigured = Boolean(data.oidc_configured)
+    session.livenessEnabled = Boolean(data.liveness_enabled)
   } catch {
     // ignore: stay on the login form
   }
@@ -83,7 +84,8 @@ async function startFaceLogin() {
     }
   }
   hint.value = '正在通过人脸识别登录…'
-  faceTimer = setInterval(attemptFaceLogin, 2000)
+  const interval = session.livenessEnabled ? 4500 : 2000
+  faceTimer = setInterval(attemptFaceLogin, interval)
 }
 
 function stopFaceLogin() {
@@ -98,26 +100,54 @@ function stopFaceLogin() {
   face.running = false
 }
 
-async function attemptFaceLogin() {
-  const element = cameraVideo.value
-  if (!element || !element.videoWidth || faceBusy) return
-  faceBusy = true
+function captureFrame(element) {
   const canvas = document.createElement('canvas')
   canvas.width = element.videoWidth
   canvas.height = element.videoHeight
   canvas.getContext('2d').drawImage(element, 0, 0)
-  canvas.toBlob(async (blob) => {
-    try {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.85)
+  })
+}
+
+async function attemptFaceLogin() {
+  const element = cameraVideo.value
+  if (!element || !element.videoWidth || faceBusy) return
+  faceBusy = true
+  try {
+    if (!session.livenessEnabled) {
+      const blob = await captureFrame(element)
       if (!blob) return
-      await meApi.faceLogin(new File([blob], `login-${Date.now()}.jpg`, {type: 'image/jpeg'}))
+      await meApi.faceLogin(new File([blob], 'login.jpg', {type: 'image/jpeg'}))
       stopFaceLogin()
       window.location.href = '/'
-    } catch (err) {
-      hint.value = friendlyError(err)
-    } finally {
-      faceBusy = false
+      return
     }
-  }, 'image/jpeg', 0.85)
+
+    // liveness mode: capture 1 primary + 3 liveness frames with natural
+    // spacing so facial micro-movement is detectable
+    hint.value = '正在采集多帧画面进行活体验证…'
+    const form = new FormData()
+    const primary = await captureFrame(element)
+    if (!primary) return
+    form.append('image', primary, 'login.jpg')
+    for (let i = 0; i < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 450))
+      const frame = await captureFrame(element)
+      if (frame) {
+        form.append('liveness', frame, `frame${i}.jpg`)
+        face.livenessFrames = i + 1
+      }
+    }
+    hint.value = '正在验证…'
+    await meApi.faceLoginLiveness(form)
+    stopFaceLogin()
+    window.location.href = '/'
+  } catch (err) {
+    hint.value = friendlyError(err)
+  } finally {
+    faceBusy = false
+  }
 }
 </script>
 
