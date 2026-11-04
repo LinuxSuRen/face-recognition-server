@@ -6,10 +6,12 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/LinuxSuRen/face-recognition-server/internal/auth"
 	"github.com/LinuxSuRen/face-recognition-server/internal/engine"
+	"github.com/LinuxSuRen/face-recognition-server/internal/liveness"
 	"github.com/LinuxSuRen/face-recognition-server/internal/recognizer"
 	"github.com/LinuxSuRen/face-recognition-server/internal/store"
 )
@@ -46,6 +48,10 @@ func registerAuthRoutes(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/tokens", api.listTokens)
 	mux.HandleFunc("POST /api/v1/tokens", api.createToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", api.deleteToken)
+	mux.HandleFunc("GET /api/v1/login-events", api.listLoginEvents)
+	mux.HandleFunc("GET /api/v1/login-events/{id}/image", api.loginEventImage)
+	mux.HandleFunc("GET /api/v1/settings", api.getSettings)
+	mux.HandleFunc("PUT /api/v1/settings", api.updateSettings)
 
 	// external face recognition API (bearer tokens, independent of the
 	// browser session auth)
@@ -73,6 +79,8 @@ func (api *authAPI) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, auth.ErrInvalidCredentials.Error())
 		return
 	}
+	_ = api.deps.Store.CreateLoginEvent(r.Context(),
+		user.ID, "password", 0, nil, "", clientIP(r))
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookie,
 		Value:    token,
@@ -96,9 +104,10 @@ func (api *authAPI) logout(w http.ResponseWriter, r *http.Request) {
 
 func (api *authAPI) session(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]any{
-		"authenticated":   false,
-		"auth_enabled":    api.deps.AuthEnabled,
-		"oidc_configured": api.deps.OIDC.Configured(),
+		"authenticated":    false,
+		"auth_enabled":     api.deps.AuthEnabled,
+		"oidc_configured":  api.deps.OIDC.Configured(),
+		"liveness_enabled": api.deps.Store.GetSettingBool(r.Context(), "liveness_enabled", false),
 	}
 	if user := api.deps.SessionUser(r); user != nil {
 		payload["authenticated"] = true
@@ -107,17 +116,24 @@ func (api *authAPI) session(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
-// faceLogin authenticates the platform itself by face: the browser posts a
-// webcam snapshot and the best account match above the threshold gets the
-// session.
+// faceLogin authenticates by face. When the admin enables liveness
+// detection, the browser submits several consecutive frames so the server
+// can verify independent facial micro-movement (anti photo/replay).
 func (api *authAPI) faceLogin(w http.ResponseWriter, r *http.Request) {
+	livenessEnabled := api.deps.Store.GetSettingBool(r.Context(), "liveness_enabled", false)
+	if api.deps.Engine == nil {
+		writeError(w, http.StatusServiceUnavailable, engineUnavailableDetail)
+		return
+	}
+
+	if livenessEnabled {
+		api.faceLoginWithLiveness(w, r)
+		return
+	}
+
 	upload, status, err := readUpload(r, api.deps.Config.MaxImageBytes, "image")
 	if err != nil {
 		writeError(w, status, err.Error())
-		return
-	}
-	if api.deps.Engine == nil {
-		writeError(w, http.StatusServiceUnavailable, engineUnavailableDetail)
 		return
 	}
 	image, err := engine.DecodeImage(upload.Content)
@@ -132,6 +148,113 @@ func (api *authAPI) faceLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+	api.completeFaceLogin(w, r, token, user, similarity, upload.Content, upload.ContentType)
+}
+
+// faceLoginWithLiveness reads multiple frames, verifies identity across all
+// of them and runs the liveness check before opening the session.
+func (api *authAPI) faceLoginWithLiveness(w http.ResponseWriter, r *http.Request) {
+	reader, err := r.MultipartReader()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "请求必须是 multipart/form-data")
+		return
+	}
+	var primaryUpload upload
+	var livenessFrames [][]byte
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "malformed multipart request")
+			return
+		}
+		name := part.FormName()
+		if part.FileName() == "" {
+			part.Close()
+			continue
+		}
+		content, err := io.ReadAll(io.LimitReader(part, api.deps.Config.MaxImageBytes+1))
+		mimeType := part.Header.Get("Content-Type")
+		part.Close()
+		if err != nil || len(content) == 0 {
+			continue
+		}
+		if sniffed := sniffImage(content); sniffed != "" {
+			mimeType = sniffed
+		}
+		if !allowedImageType(mimeType) {
+			continue
+		}
+		if name == "image" {
+			primaryUpload = upload{Content: content, ContentType: mimeType}
+		} else if name == "liveness" {
+			livenessFrames = append(livenessFrames, content)
+		}
+	}
+	if primaryUpload.Content == nil {
+		writeError(w, http.StatusBadRequest, "缺少 image 字段")
+		return
+	}
+	if len(livenessFrames) < liveness.MinFrames-1 {
+		writeError(w, http.StatusUnprocessableEntity,
+			"活体检测已启用：请让浏览器自动采集多帧画面")
+		return
+	}
+
+	// decode all frames and extract the largest face from each
+	var allFaces []engine.ExtractedFace
+	primaryImage, err := engine.DecodeImage(primaryUpload.Content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	primaryFaces, err := api.deps.Engine.Extract(primaryImage)
+	if err != nil || len(primaryFaces) == 0 || primaryFaces[0].Embedding == nil {
+		writeError(w, http.StatusUnauthorized, auth.ErrNoFace.Error())
+		return
+	}
+	allFaces = append(allFaces, primaryFaces[0])
+	for _, frameContent := range livenessFrames {
+		frameImage, err := engine.DecodeImage(frameContent)
+		if err != nil {
+			continue
+		}
+		frameFaces, err := api.deps.Engine.Extract(frameImage)
+		if err != nil || len(frameFaces) == 0 || frameFaces[0].Embedding == nil {
+			continue
+		}
+		allFaces = append(allFaces, frameFaces[0])
+	}
+
+	// liveness check
+	threshold := api.deps.Store.GetSettingFloat(r.Context(), "liveness_threshold", 0.3)
+	livenessResult := liveness.Check(allFaces, threshold)
+	if !livenessResult.Live {
+		api.deps.Logger.Info("[auth][face-login] liveness failed",
+			"score", livenessResult.Score, "reason", livenessResult.Reason)
+		writeError(w, http.StatusUnauthorized,
+			"活体验证未通过："+livenessResult.Reason)
+		return
+	}
+
+	// identity check on the primary frame
+	token, user, similarity, err := api.auth.FaceLogin(r.Context(), primaryImage,
+		api.deps.Engine, api.deps.Config.KnownThreshold)
+	if err != nil {
+		api.deps.Logger.Info("[auth][face-login] failed", "reason", err.Error())
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	api.deps.Logger.Info("[auth][face-login] liveness passed",
+		"score", livenessResult.Score)
+	api.completeFaceLogin(w, r, token, user, similarity,
+		primaryUpload.Content, primaryUpload.ContentType)
+}
+
+func (api *authAPI) completeFaceLogin(w http.ResponseWriter, r *http.Request,
+	token string, user *store.User, similarity float64, image []byte, mimeType string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookie,
 		Value:    token,
@@ -140,6 +263,9 @@ func (api *authAPI) faceLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(auth.SessionLifetime.Seconds()),
 	})
+	_ = api.deps.Store.CreateLoginEvent(r.Context(),
+		user.ID, "face", math.Round(similarity*10000)/10000,
+		image, mimeType, clientIP(r))
 	api.deps.Logger.Info("[auth][face-login] success",
 		"username", user.Username, "similarity", math.Round(similarity*10000)/10000)
 	writeJSON(w, http.StatusOK, map[string]any{"user": user})
@@ -700,6 +826,114 @@ func (api *authAPI) enroll(w http.ResponseWriter, r *http.Request, _ *store.APIT
 		"sample_id":     template.ID,
 		"quality_score": face.Quality.Score,
 	})
+}
+
+// ---- login audit ----
+
+func (api *authAPI) listLoginEvents(w http.ResponseWriter, r *http.Request) {
+	query := parsePageQuery(r)
+	events, total, err := api.deps.Store.ListLoginEvents(r.Context(), query.Page, query.PageSize)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "加载登录记录失败")
+		return
+	}
+	if events == nil {
+		events = []store.LoginEvent{}
+	}
+	for i := range events {
+		if events[i].HasImage {
+			events[i].ImageMimeType = "/api/v1/login-events/" +
+				strconv.FormatInt(events[i].ID, 10) + "/image"
+		} else {
+			events[i].ImageMimeType = ""
+		}
+	}
+	writeJSON(w, http.StatusOK, PageResponse{
+		Data: events, Page: query.Page, Total: total, PageSize: query.PageSize,
+	})
+}
+
+func (api *authAPI) loginEventImage(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r, "id")
+	if !ok {
+		return
+	}
+	image, mimeType, err := api.deps.Store.GetLoginEventImage(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "登录照片不存在")
+		return
+	}
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(image)
+}
+
+// ---- system settings (admin) ----
+
+func (api *authAPI) getSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := api.deps.Store.GetSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "加载设置失败")
+		return
+	}
+	if settings == nil {
+		settings = store.Settings{}
+	}
+	// supply defaults so the UI always has complete values
+	if _, exists := settings["liveness_enabled"]; !exists {
+		settings["liveness_enabled"] = false
+	}
+	if _, exists := settings["liveness_threshold"]; !exists {
+		settings["liveness_threshold"] = 0.3
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (api *authAPI) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var body store.Settings
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体必须是 JSON 对象")
+		return
+	}
+	// whitelist known settings keys
+	allowed := store.Settings{}
+	if value, exists := body["liveness_enabled"]; exists {
+		if enabled, ok := value.(bool); ok {
+			allowed["liveness_enabled"] = enabled
+		}
+	}
+	if value, exists := body["liveness_threshold"]; exists {
+		if threshold, ok := value.(float64); ok && threshold >= 0 && threshold <= 1 {
+			allowed["liveness_threshold"] = threshold
+		}
+	}
+	if len(allowed) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "没有可更新的设置项")
+		return
+	}
+	if err := api.deps.Store.UpdateSettings(r.Context(), allowed); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存设置失败")
+		return
+	}
+	api.deps.Logger.Info("[settings] updated", "keys", allowed)
+	writeJSON(w, http.StatusOK, allowed)
+}
+
+// clientIP extracts the best-guess origin address.
+func clientIP(r *http.Request) string {
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		parts := strings.SplitN(forwarded, ",", 2)
+		return strings.TrimSpace(parts[0])
+	}
+	if real := r.Header.Get("X-Real-IP"); real != "" {
+		return real
+	}
+	host := r.RemoteAddr
+	if index := strings.LastIndex(host, ":"); index > 0 {
+		host = host[:index]
+	}
+	return host
 }
 
 func deref(value *string) string {

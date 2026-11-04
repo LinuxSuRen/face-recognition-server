@@ -1,12 +1,15 @@
 <script setup>
 import {onMounted, reactive, ref} from 'vue'
 import {adminApi} from '../api'
-import {friendlyError} from '../errors'
+import {formatScore, friendlyError} from '../errors'
 
 const notice = ref('')
 const users = ref([])
 const userPage = reactive({page: 1, total: 0, pageSize: 20})
 const tokens = ref([])
+const loginEvents = ref([])
+const eventPage = reactive({page: 1, total: 0, pageSize: 10})
+const settings = reactive({liveness_enabled: false, liveness_threshold: 0.3})
 
 const userFormOpen = ref(false)
 const userForm = reactive({username: '', display_name: '', password: '', role: 'user'})
@@ -24,6 +27,48 @@ async function loadUsers() {
     const data = await adminApi.listUsers({page: userPage.page, page_size: userPage.pageSize})
     users.value = data.data || []
     userPage.total = data.total || 0
+  } catch (error) {
+    setNotice(friendlyError(error))
+  }
+}
+
+async function loadLoginEvents(page = 1) {
+  try {
+    const data = await adminApi.listLoginEvents({page, page_size: eventPage.pageSize})
+    loginEvents.value = data.data || []
+    eventPage.total = data.total || 0
+    eventPage.page = data.page || page
+  } catch (error) {
+    setNotice(friendlyError(error))
+  }
+}
+
+function methodText(method) {
+  const map = {face: '人脸', password: '密码', oidc: 'SSO'}
+  return map[method] || method
+}
+
+async function loadSettings() {
+  try {
+    const data = await adminApi.getSettings()
+    if (data.liveness_enabled !== undefined) {
+      settings.liveness_enabled = Boolean(data.liveness_enabled)
+    }
+    if (data.liveness_threshold !== undefined) {
+      settings.liveness_threshold = Number(data.liveness_threshold)
+    }
+  } catch (error) {
+    setNotice(friendlyError(error))
+  }
+}
+
+async function saveSettings() {
+  try {
+    await adminApi.updateSettings({
+      liveness_enabled: settings.liveness_enabled,
+      liveness_threshold: settings.liveness_threshold,
+    })
+    setNotice(settings.liveness_enabled ? '活体检测已开启' : '活体检测已关闭')
   } catch (error) {
     setNotice(friendlyError(error))
   }
@@ -110,6 +155,8 @@ async function deleteToken(token) {
 onMounted(() => {
   loadUsers()
   loadTokens()
+  loadLoginEvents()
+  loadSettings()
 })
 </script>
 
@@ -186,6 +233,74 @@ onMounted(() => {
           </tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="panel">
+      <header class="row">
+        <h3>系统设置</h3>
+      </header>
+      <div class="setting-row">
+        <div>
+          <strong>人脸登录活体检测</strong>
+          <p class="muted">开启后，人脸登录需要采集多帧画面并检测自然的面部微运动，可拦截照片和屏幕翻拍攻击。</p>
+        </div>
+        <label class="switch">
+          <input v-model="settings.liveness_enabled" type="checkbox" @change="saveSettings" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div v-if="settings.liveness_enabled" class="setting-row">
+        <div>
+          <strong>灵敏度阈值</strong>
+          <p class="muted">越高越严格（误拒率上升），越低越宽松（可能放过照片）。建议 0.3。</p>
+        </div>
+        <input
+          v-model.number="settings.liveness_threshold"
+          type="range"
+          min="0.1"
+          max="0.8"
+          step="0.05"
+          @change="saveSettings"
+        />
+        <span class="muted">{{ settings.liveness_threshold }}</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header class="row">
+        <h3>登录记录</h3>
+        <span class="muted">人脸登录的照片保留在此，方便回溯审查</span>
+      </header>
+      <table v-if="loginEvents.length">
+        <thead>
+          <tr><th>时间</th><th>用户</th><th>方式</th><th>相似度</th><th>来源 IP</th><th>照片</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="event in loginEvents" :key="event.id">
+            <td>{{ event.created_at }}</td>
+            <td>{{ event.username }}</td>
+            <td>{{ methodText(event.method) }}</td>
+            <td>{{ event.method === 'face' ? formatScore(event.similarity) : '—' }}</td>
+            <td>{{ event.ip || '—' }}</td>
+            <td>
+              <img
+                v-if="event.image_mime_type"
+                :src="event.image_mime_type"
+                alt="登录照片"
+                class="login-photo"
+                loading="lazy"
+              />
+              <span v-else class="muted">—</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">暂无登录记录。</p>
+      <div v-if="eventPage.total > eventPage.pageSize" class="pager">
+        <button :disabled="eventPage.page <= 1" @click="loadLoginEvents(eventPage.page - 1)">上一页</button>
+        <span class="muted">{{ eventPage.page }} / {{ Math.ceil(eventPage.total / eventPage.pageSize) }}</span>
+        <button :disabled="eventPage.page * eventPage.pageSize >= eventPage.total" @click="loadLoginEvents(eventPage.page + 1)">下一页</button>
+      </div>
     </section>
   </div>
 </template>
@@ -281,5 +396,85 @@ button.link.danger {
   padding: 2px 6px;
   word-break: break-all;
   user-select: all;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.setting-row > div {
+  flex: 1;
+}
+
+.setting-row strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.setting-row input[type="range"] {
+  width: 120px;
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch .slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--line);
+  border-radius: 24px;
+  transition: 0.3s;
+}
+
+.switch .slider::before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.3s;
+}
+
+.switch input:checked + .slider {
+  background: var(--primary);
+}
+
+.switch input:checked + .slider::before {
+  transform: translateX(20px);
+}
+
+.login-photo {
+  width: 64px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
 }
 </style>

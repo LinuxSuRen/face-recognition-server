@@ -169,6 +169,22 @@ CREATE TABLE IF NOT EXISTS user_faces (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_user_faces_user_id ON user_faces(user_id);
+CREATE TABLE IF NOT EXISTS login_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    method TEXT NOT NULL,
+    similarity REAL NOT NULL DEFAULT 0,
+    image BLOB,
+    image_mime_type TEXT,
+    ip TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_events_user_id ON login_events(user_id);
+CREATE TABLE IF NOT EXISTS system_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return fmt.Errorf("migrating database: %w", err)

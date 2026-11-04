@@ -105,6 +105,15 @@ export const adminApi = {
   logout() {
     return request('/api/v1/auth/logout', {method: 'POST'})
   },
+  listLoginEvents(params) {
+    return request(`/api/v1/login-events${queryString(params)}`)
+  },
+  getSettings() {
+    return request('/api/v1/settings')
+  },
+  updateSettings(body) {
+    return request('/api/v1/settings', {method: 'PUT', body: JSON.stringify(body)})
+  },
 }
 
 export const meApi = {
@@ -122,6 +131,9 @@ export const meApi = {
   faceLogin(file) {
     const form = new FormData()
     form.append('image', file)
+    return request('/api/v1/auth/face-login', {method: 'POST', body: form})
+  },
+  faceLoginLiveness(form) {
     return request('/api/v1/auth/face-login', {method: 'POST', body: form})
   },
 }
